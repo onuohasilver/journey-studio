@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.local
+.DS_Store
+
+# Local configuration holds credentials — never commit it.
+journey.config.local.json
+.env
+.env.*
+!.env.example
+
+.vscode/*
+!.vscode/extensions.json
+.idea/
