@@ -243,6 +243,7 @@ export function importOpenApi(text: string, filename?: string): ImportResult {
         request,
         needs: inferNeeds(request, defaults),
         gives: inferGives(op, path),
+        responseSchema: successSchema(op),
         assertions: [{op: 'status', expected: Number(Object.keys(op.responses ?? {}).find((c) => /^2\d\d$/.test(c))) || 200}],
         destructive: method === 'DELETE',
       });

@@ -6,7 +6,7 @@ import {Canvas} from './Canvas';
 import {Palette} from './Palette';
 import {Inspector} from './Inspector';
 import {AiPanel} from './AiPanel';
-import {ExplainPanel, PacksPanel} from './Panels';
+import {ExplainPanel, PacksPanel, ReportPanel, SavedPanel} from './Panels';
 import {ImportDialog} from './ImportDialog';
 
 register(BUILTINS);
@@ -16,6 +16,8 @@ const RAIL_TITLE: Record<Rail, string> = {
   ai: '✳ Build with AI',
   explain: '▤ Explain',
   packs: 'Imported documents',
+  report: '▦ QA report',
+  saved: 'Saved journeys',
 };
 
 function Logs() {
@@ -88,6 +90,8 @@ function Topbar({onImport}: {onImport: () => void}) {
         <button className="tool" aria-pressed={rail === 'packs'} onClick={() => toggle('packs')}>Documents</button>
         <button className="tool" aria-pressed={rail === 'ai'} onClick={() => toggle('ai')}>Build with AI</button>
         <button className="tool" aria-pressed={rail === 'explain'} onClick={() => toggle('explain')}>Explain</button>
+        <button className="tool" aria-pressed={rail === 'saved'} onClick={() => toggle('saved')}>Journeys</button>
+        <button className="tool" aria-pressed={rail === 'report'} onClick={() => toggle('report')}>Report</button>
         {running ? (
           <button className="tool stop" onClick={stop}>■ Stop</button>
         ) : (
@@ -146,6 +150,8 @@ export default function App() {
           {rail === 'ai' && <AiPanel />}
           {rail === 'explain' && <ExplainPanel />}
           {rail === 'packs' && <PacksPanel onImport={() => setImporting(true)} />}
+          {rail === 'report' && <ReportPanel />}
+          {rail === 'saved' && <SavedPanel />}
         </aside>
       </div>
       {importing && <ImportDialog onClose={() => setImporting(false)} />}

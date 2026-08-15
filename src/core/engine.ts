@@ -7,6 +7,7 @@
 // without a server and safe without a secret in the browser.
 
 import {runAssertions, describeFailure} from './assert';
+import {checkContract, summariseContract, type ContractOptions} from './contract';
 import {downstreamOf, topoOrder} from './graph';
 import {readResponse, resolve} from './template';
 import type {
@@ -45,6 +46,10 @@ export interface RunOptions {
   priorResponses?: Record<string, HttpResponse>;
   /** Abort between steps. */
   signal?: AbortSignal;
+  /** How picky the contract check is. */
+  contract?: ContractOptions;
+  /** Treat a contract break as a step failure. Off by default. */
+  strictContract?: boolean;
 }
 
 export interface RunResult {
@@ -229,17 +234,36 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
 
       const assertions = runAssertions(res, def.assertions);
       const failed = assertions.filter((a) => !a.pass);
+
+      // The response is checked against the schema the source document declared.
+      //
+      // Only for a success status: the schema we captured is the 2xx one, and an
+      // error body was never meant to match it. Checking a 500 against it
+      // produces a finding that is technically true and completely useless —
+      // and one false finding is all it takes for people to stop reading the
+      // report.
+      const success = res.status >= 200 && res.status < 300;
+      const contract = def.responseSchema && success
+        ? checkContract(def.responseSchema, res.body, opts.contract)
+        : [];
+      const contractBreaks = contract.filter((f) => f.severity === 'error');
+
       const state: NodeState = {
-        status: failed.length ? 'failed' : 'passed',
+        status: failed.length || (opts.strictContract && contractBreaks.length) ? 'failed' : 'passed',
         response: res,
         assertions,
         sent: request,
         durationMs: Date.now() - started,
-        ...(failed.length ? {error: failed.map(describeFailure).join('; ')} : {}),
+        ...(contract.length ? {contract} : {}),
+        ...(failed.length
+          ? {error: failed.map(describeFailure).join('; ')}
+          : opts.strictContract && contractBreaks.length
+            ? {error: contractBreaks.map((f) => f.message).join('; ')}
+            : {}),
       };
       states[node.id] = state;
 
-      if (failed.length) {
+      if (state.status === 'failed') {
         hooks?.onLog?.(`✗ ${label} — ${state.error}`);
         hooks?.onNodeEnd?.(node.id, state);
         passed = false;
@@ -247,7 +271,10 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       }
 
       extract(def.gives, res, ctx, hooks?.onLog);
-      hooks?.onLog?.(`✓ ${label} · ${res.status} · ${res.durationMs}ms`);
+      // A passing step that drifted from its contract still says so — that is
+      // usually the most interesting line in the whole run.
+      const drift = contractBreaks.length ? ` · ⚠ ${summariseContract(contract)}` : '';
+      hooks?.onLog?.(`✓ ${label} · ${res.status} · ${res.durationMs}ms${drift}`);
       hooks?.onNodeEnd?.(node.id, state);
       hooks?.onContext?.(ctx);
     } catch (err) {

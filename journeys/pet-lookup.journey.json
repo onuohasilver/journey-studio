@@ -1,0 +1,340 @@
+{
+  "version": 1,
+  "name": "Pet lookup",
+  "description": "Sets a known pet id, reads it back, then lists available pets.",
+  "savedAt": "2026-08-15T16:31:15.929Z",
+  "env": "demo",
+  "journey": {
+    "name": "Pet lookup",
+    "description": "Sets a known pet id, reads it back, then lists available pets.",
+    "nodes": [
+      {
+        "id": "s1",
+        "type": "control.set",
+        "label": "Use a known pet",
+        "config": {
+          "values": {
+            "petId": 1
+          }
+        },
+        "position": {
+          "x": 40,
+          "y": 120
+        }
+      },
+      {
+        "id": "s2",
+        "type": "openapi.swagger-petstore-openapi-3-0.getPetById",
+        "label": "Read the pet",
+        "config": {},
+        "position": {
+          "x": 300,
+          "y": 300
+        }
+      },
+      {
+        "id": "s3",
+        "type": "openapi.swagger-petstore-openapi-3-0.findPetsByStatus",
+        "label": "List available pets",
+        "config": {
+          "status": "available"
+        },
+        "position": {
+          "x": 560,
+          "y": 120
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "s1",
+        "target": "s2"
+      },
+      {
+        "id": "e2",
+        "source": "s2",
+        "target": "s3"
+      }
+    ]
+  },
+  "defs": [
+    {
+      "type": "control.set",
+      "label": "Set values",
+      "summary": "Write values into the run context for later steps to use.",
+      "group": "Building blocks",
+      "control": "set",
+      "givesFrom": "values",
+      "fields": [
+        {
+          "key": "values",
+          "label": "Values",
+          "kind": "json",
+          "help": "Each key becomes a context value. Values may use {{templates}}."
+        }
+      ],
+      "defaults": {
+        "values": {}
+      },
+      "needs": [],
+      "gives": []
+    },
+    {
+      "type": "openapi.swagger-petstore-openapi-3-0.getPetById",
+      "label": "Find pet by ID.",
+      "summary": "Returns a single pet.",
+      "group": "pet",
+      "fields": [
+        {
+          "key": "petId",
+          "label": "petId",
+          "kind": "number",
+          "help": "ID of pet to return",
+          "required": true
+        }
+      ],
+      "defaults": {
+        "petId": "{{vars.petId}}"
+      },
+      "request": {
+        "method": "GET",
+        "path": "/pet/{{fields.petId}}"
+      },
+      "needs": [
+        "petId"
+      ],
+      "gives": [
+        {
+          "key": "petId",
+          "from": "body.id"
+        }
+      ],
+      "responseSchema": {
+        "required": [
+          "name",
+          "photoUrls"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 10
+          },
+          "name": {
+            "type": "string",
+            "example": "doggie"
+          },
+          "category": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "example": 1
+              },
+              "name": {
+                "type": "string",
+                "example": "Dogs"
+              }
+            },
+            "xml": {
+              "name": "category"
+            }
+          },
+          "photoUrls": {
+            "type": "array",
+            "xml": {
+              "wrapped": true
+            },
+            "items": {
+              "type": "string",
+              "xml": {
+                "name": "photoUrl"
+              }
+            }
+          },
+          "tags": {
+            "type": "array",
+            "xml": {
+              "wrapped": true
+            },
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "xml": {
+                "name": "tag"
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "pet status in the store",
+            "enum": [
+              "available",
+              "pending",
+              "sold"
+            ]
+          }
+        },
+        "xml": {
+          "name": "pet"
+        }
+      },
+      "assertions": [
+        {
+          "op": "status",
+          "expected": 200
+        }
+      ],
+      "destructive": false
+    },
+    {
+      "type": "openapi.swagger-petstore-openapi-3-0.findPetsByStatus",
+      "label": "Finds Pets by status.",
+      "summary": "Multiple status values can be provided with comma separated strings.",
+      "group": "pet",
+      "fields": [
+        {
+          "key": "status",
+          "label": "status",
+          "kind": "select",
+          "help": "Status values that need to be considered for filter",
+          "options": [
+            {
+              "value": "available",
+              "label": "available"
+            },
+            {
+              "value": "pending",
+              "label": "pending"
+            },
+            {
+              "value": "sold",
+              "label": "sold"
+            }
+          ],
+          "required": true
+        }
+      ],
+      "defaults": {
+        "status": "available"
+      },
+      "request": {
+        "method": "GET",
+        "path": "/pet/findByStatus",
+        "query": {
+          "status": "{{fields.status}}"
+        }
+      },
+      "needs": [],
+      "gives": [],
+      "responseSchema": {
+        "type": "array",
+        "items": {
+          "required": [
+            "name",
+            "photoUrls"
+          ],
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "int64",
+              "example": 10
+            },
+            "name": {
+              "type": "string",
+              "example": "doggie"
+            },
+            "category": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "format": "int64",
+                  "example": 1
+                },
+                "name": {
+                  "type": "string",
+                  "example": "Dogs"
+                }
+              },
+              "xml": {
+                "name": "category"
+              }
+            },
+            "photoUrls": {
+              "type": "array",
+              "xml": {
+                "wrapped": true
+              },
+              "items": {
+                "type": "string",
+                "xml": {
+                  "name": "photoUrl"
+                }
+              }
+            },
+            "tags": {
+              "type": "array",
+              "xml": {
+                "wrapped": true
+              },
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "xml": {
+                  "name": "tag"
+                }
+              }
+            },
+            "status": {
+              "type": "string",
+              "description": "pet status in the store",
+              "enum": [
+                "available",
+                "pending",
+                "sold"
+              ]
+            }
+          },
+          "xml": {
+            "name": "pet"
+          }
+        }
+      },
+      "assertions": [
+        {
+          "op": "status",
+          "expected": 200
+        }
+      ],
+      "destructive": false
+    }
+  ],
+  "sources": [
+    {
+      "slug": "swagger-petstore-openapi-3-0",
+      "title": "Swagger Petstore - OpenAPI 3.0",
+      "format": "openapi"
+    }
+  ]
+}

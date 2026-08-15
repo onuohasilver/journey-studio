@@ -117,6 +117,12 @@ export interface NodeDef {
    */
   givesFrom?: string;
   assertions?: Assertion[];
+  /**
+   * The success-response schema the source document declared, kept so every run
+   * can check what came back against what was promised. This is the check
+   * nobody has to write, and it only exists because the document was imported.
+   */
+  responseSchema?: unknown;
   /** The gotcha. The most valuable line a definition can carry. */
   notes?: string;
   /** Marks a node that creates or destroys real data. */
@@ -159,6 +165,8 @@ export interface NodeState {
   durationMs?: number;
   /** Resolved request, kept so a failed step can be inspected as it was sent. */
   sent?: ResolvedRequest;
+  /** Where the response departed from the schema the document declared. */
+  contract?: import('./contract').ContractFinding[];
 }
 
 export interface ResolvedRequest {

@@ -9,10 +9,18 @@ import {readFileSync, existsSync} from 'node:fs';
 import path from 'node:path';
 import type {AuthScheme, EnvironmentConfig} from '../src/core/types';
 
+export interface SlackConfig {
+  /** Incoming webhook URL. This *is* the credential — it never leaves this side. */
+  webhookUrl?: string;
+  /** Prefix for the message headline, e.g. the service name. */
+  title?: string;
+}
+
 export interface ServerConfig {
   environments: EnvironmentConfig[];
   auth: Record<string, AuthScheme>;
   secrets: Record<string, string>;
+  slack?: SlackConfig;
 }
 
 /** What the browser is allowed to know: names, never values. */
@@ -20,6 +28,8 @@ export interface PublicConfig {
   environments: {name: string; baseUrl: string}[];
   authSchemes: string[];
   secretNames: string[];
+  /** Whether a report can be posted — never the webhook itself. */
+  slackConfigured: boolean;
 }
 
 const FILES = ['journey.config.local.json', 'journey.config.json'];
@@ -74,10 +84,16 @@ export function loadConfig(root = process.cwd()): ServerConfig {
     }
   }
 
+  const slack: ServerConfig['slack'] = {
+    ...expanded.slack,
+    webhookUrl: expanded.slack?.webhookUrl || process.env.SLACK_WEBHOOK_URL || undefined,
+  };
+
   cached = {
     environments: expanded.environments?.length ? expanded.environments : DEFAULT_CONFIG.environments,
     auth: expanded.auth ?? {},
     secrets: {...(expanded.secrets ?? {}), ...fromEnv},
+    ...(slack.webhookUrl || slack.title ? {slack} : {}),
   };
   return cached;
 }
@@ -87,6 +103,7 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     environments: config.environments.map((e) => ({name: e.name, baseUrl: e.baseUrl})),
     authSchemes: Object.keys(config.auth),
     secretNames: Object.keys(config.secrets),
+    slackConfigured: Boolean(config.slack?.webhookUrl),
   };
 }
 

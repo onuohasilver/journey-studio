@@ -7,6 +7,9 @@ Import an OpenAPI document or a Postman collection, wire the steps together, and
 real environment. Or describe what you want in plain English and let it assemble the journey — then
 keep editing it in place.
 
+Save a journey and it becomes a regression test: `journey run` executes it in CI, checks every
+response against the spec the API published, and posts the report to Slack.
+
 ```bash
 npm install
 npm run dev     # http://localhost:5180
@@ -70,6 +73,59 @@ The model is grounded, not trusted. Every node type, setting and step reference 
 re-checked against the live registry before it reaches the canvas — anything that fails is reported,
 not silently applied.
 
+## Using it for QA
+
+A journey you can save is a test. A journey you can run on a schedule is a suite.
+
+```bash
+npx journey run                       # every saved journey, default environment
+npx journey run signup --env staging  # one journey, somewhere specific
+npx journey run --repeat 5            # run five times and name the flaky steps
+npx journey run --report qa.json      # write the evidence
+npx journey run --slack               # post the result
+npx journey run --strict-contract     # fail when a response stops matching the spec
+```
+
+Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
+
+### Contract checking — the assertions nobody has to write
+
+Because the document was imported, every node knows the response schema its API published. So each
+run compares what came back against what was promised, and reports the failures no hand-written
+assertion would have anticipated: a required field that quietly disappeared, a string that became a
+number, an enum that grew a value the client will not understand.
+
+Assertions test what you thought to check. This tests what the API said.
+
+Findings are reported but do not fail the run unless you pass `--strict-contract` — drift is often
+something you are shipping deliberately, and the point is that you find out either way. Only success
+responses are checked: an error body was never meant to match the 2xx schema, and one false finding
+is all it takes for people to stop reading the report.
+
+### What a report carries
+
+Per step: status, HTTP code, timing, the failing assertion, and — for failures — the exact request
+that was sent, so it reproduces. Per journey: the values the run captured, which is to say **the
+records it created on a shared environment**. Plus anywhere the API stopped matching its spec.
+
+Response bodies are left out by default (`--include-bodies` opts in): they routinely hold tokens and
+personal data, and reports get pasted into channels.
+
+### Saved journeys are self-contained
+
+A saved journey embeds the definitions of the node types it uses. Two consequences, both wanted: it
+runs in CI with no document to import and no setup step, and it pins the contract as it was the day
+you saved it — so if the spec later changes, that difference is the news rather than something
+papered over.
+
+### Slack
+
+Set `SLACK_WEBHOOK_URL` in `.env.local`, or `slack.webhookUrl` in your config. The webhook URL *is*
+the credential, so it stays on the server: the browser posts the report, never the secret.
+
+The message leads with the verdict, then the failing steps and how to reproduce them, then what the
+run created. It never contains a response body.
+
 ## Credentials
 
 The engine hands a resolved request to a transport; in the app that transport is a local proxy that
@@ -106,7 +162,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 108 tests, no network
+npm test        # 146 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -125,10 +181,15 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Canvas, palette, inspector, logs
 - [x] AI — build a journey, edit it in place, explain it
 - [x] Undo/redo — coalesced per field, one step per AI edit
-- [ ] Save and load journeys to disk
+- [x] Save and load journeys, self-contained so they run in CI
+- [x] Contract checking against the imported spec
+- [x] QA report — evidence, created data, contract drift
+- [x] CLI runner with exit codes, `--repeat` flake detection, and Slack delivery
+- [ ] Data-driven runs — one journey over a table of inputs
+- [ ] Response snapshots, to catch drift in APIs with no spec
+- [ ] Teardown tracking, so a suite can clean up what it created
 - [ ] Webhook inbox for async steps
 - [ ] Assertion editor in the inspector
-- [ ] CLI runner, so a saved journey becomes a CI check
 
 ## License
 

@@ -3,10 +3,12 @@
 import express, {type Express} from 'express';
 import {createAiRouter} from './ai';
 import {createApiRouter} from './proxy';
+import {createJourneyRouter} from './journeys';
 
 export function createApi(root = process.cwd()): Express {
   const app = express();
   app.use('/api/ai', createAiRouter());
+  app.use('/api', createJourneyRouter(root));
   app.use('/api', createApiRouter(root));
   return app;
 }

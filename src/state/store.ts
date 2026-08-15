@@ -8,13 +8,15 @@ import {create} from 'zustand';
 import {runJourney, type Transport} from '../core/engine';
 import {materialise} from '../core/builtins';
 import {topoOrder} from '../core/graph';
-import {allDefs, lookup as registryLookup, registerPack, removePack, allPacks, type Pack} from '../core/registry';
+import {allDefs, lookup as registryLookup, register, registerPack, removePack, allPacks, type Pack} from '../core/registry';
 import {importDocument} from '../core/import';
 import {applyOps, buildChain, type AppliedChange} from '../core/ai/apply';
 import {buildCanvasIndex, buildJourneyDigest, buildNodeIndex} from '../core/ai/grounding';
 import {validateEdit, validatePlan} from '../core/ai/validate';
 import {requestExplanation, requestPlan, requestRevision, type Explanation} from '../core/ai/client';
 import {createHistory} from './history';
+import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
+import {fileNameFor, packJourney, readSaved} from '../core/persist';
 import type {HttpResponse, ImportResult, Journey, JourneyNode, NodeDef, NodeState, ResolvedRequest} from '../core/types';
 
 /** Public config, fetched once at boot. Values never leave the server. */
@@ -35,7 +37,15 @@ export interface AiTurn {
   problems: string[];
 }
 
-export type Rail = 'inspector' | 'ai' | 'explain' | 'packs';
+export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved';
+
+export interface SavedSummary {
+  name: string;
+  file: string;
+  description?: string;
+  savedAt: string;
+  steps: number;
+}
 
 interface StudioState {
   journey: Journey;
@@ -51,6 +61,11 @@ interface StudioState {
   aiTurns: AiTurn[];
   explanation: Explanation | null;
   explaining: boolean;
+
+  /** The report for the last run — the thing QA actually takes away. */
+  report: QaReport | null;
+  saved: SavedSummary[];
+  slackConfigured: boolean;
 
   /** Labels for the next undo/redo, so the buttons can say what they'll do. */
   undoLabel?: string;
@@ -77,6 +92,12 @@ interface StudioState {
 
   importText(text: string, filename?: string): ImportResult;
   removeImported(slug: string): void;
+
+  refreshSaved(): Promise<void>;
+  saveJourney(name: string, description?: string): Promise<void>;
+  openJourney(file: string): Promise<string[]>;
+  deleteSaved(file: string): Promise<void>;
+  sendReportToSlack(): Promise<{ok: boolean; error?: string}>;
 
   plan(goal: string, thenRun: boolean): Promise<void>;
   revise(instruction: string, thenRun: boolean): Promise<void>;
@@ -164,11 +185,19 @@ export const useStudio = create<StudioState>((set, get) => {
   aiTurns: [],
   explanation: null,
   explaining: false,
+  report: null,
+  saved: [],
+  slackConfigured: false,
 
   async init() {
     try {
-      const config = (await (await fetch('/api/config')).json()) as ClientConfig;
-      set({config, env: get().env || config.environments[0]?.name || ''});
+      const config = (await (await fetch('/api/config')).json()) as ClientConfig & {slackConfigured?: boolean};
+      set({
+        config,
+        env: get().env || config.environments[0]?.name || '',
+        slackConfigured: Boolean(config.slackConfigured),
+      });
+      await get().refreshSaved();
     } catch {
       set({logs: [...get().logs, '! Could not reach the API. Is the dev server running?']});
     }
@@ -269,6 +298,7 @@ export const useStudio = create<StudioState>((set, get) => {
       }
     }
 
+    const startedAt = Date.now();
     set({running: true, states: startAt ? states : {}, logs: []});
 
     const result = await runJourney(journey, {
@@ -285,9 +315,19 @@ export const useStudio = create<StudioState>((set, get) => {
       },
     });
 
+    const finalStates = {...get().states, ...result.states};
+    const journeyReport = buildJourneyReport(journey, finalStates, result.context, lookupFor(journey));
+
     set({
       running: false,
-      states: {...get().states, ...result.states},
+      states: finalStates,
+      // Every run produces a report, not just a colour on the canvas — it is
+      // what gets exported, posted, and read the next morning.
+      report: buildReport(env, [journeyReport], {
+        startedAt: new Date(startedAt).toISOString(),
+        durationMs: Date.now() - startedAt,
+        baseUrl: get().config.environments.find((e) => e.name === env)?.baseUrl,
+      }),
       logs: [...get().logs, result.passed ? '— run complete' : '— run stopped at the first failure'],
     });
   },
@@ -324,6 +364,79 @@ export const useStudio = create<StudioState>((set, get) => {
       packs: allPacks(),
       journey: {...journey, nodes, edges: journey.edges.filter((e) => keep.has(e.source) && keep.has(e.target))},
     });
+  },
+
+  // ---- saved journeys ----
+
+  async refreshSaved() {
+    try {
+      set({saved: (await (await fetch('/api/journeys')).json()) as SavedSummary[]});
+    } catch {
+      /* the list is a convenience; failing to load it should not break the app */
+    }
+  },
+
+  async saveJourney(name, description) {
+    const {journey, env, packs} = get();
+    // The definitions travel with the file, so the journey runs in CI with no
+    // document to import and its contract is pinned as of today.
+    const saved = packJourney({...journey, name}, registryLookup, {
+      description,
+      env,
+      sources: packs.map((p) => ({slug: p.slug, title: p.title, format: p.format})),
+    });
+
+    const res = await fetch(`/api/journeys/${encodeURIComponent(fileNameFor(name))}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(saved),
+    });
+    if (!res.ok) throw new Error(((await res.json()) as {error?: string}).error ?? 'could not save');
+
+    set({journey: {...journey, name, description}, logs: [...get().logs, `saved "${name}"`]});
+    await get().refreshSaved();
+  },
+
+  async openJourney(file) {
+    const res = await fetch(`/api/journeys/${encodeURIComponent(file)}`);
+    if (!res.ok) throw new Error('could not open that journey');
+
+    const result = readSaved(JSON.stringify(await res.json()), registryLookup);
+    if (!result.ok || !result.saved) throw new Error(result.error ?? 'could not read that journey');
+
+    // Definitions from the file are registered so the steps are runnable even
+    // when the document they came from was never imported in this session.
+    if (result.saved.defs.length) register(result.saved.defs);
+
+    set({
+      journey: result.saved.journey,
+      states: {},
+      report: null,
+      selectedId: null,
+      rail: 'inspector',
+      logs: [`opened "${result.saved.name}"`],
+    });
+    history.clear();
+    set(labels());
+    return result.missingTypes;
+  },
+
+  async deleteSaved(file) {
+    await fetch(`/api/journeys/${encodeURIComponent(file)}`, {method: 'DELETE'});
+    await get().refreshSaved();
+  },
+
+  async sendReportToSlack() {
+    const {report} = get();
+    if (!report) return {ok: false, error: 'Run the journey first — there is nothing to report.'};
+    const res = await fetch('/api/report/slack', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({report}),
+    });
+    const payload = (await res.json()) as {ok?: boolean; error?: string};
+    if (payload.ok) set({logs: [...get().logs, 'posted the report to Slack']});
+    return {ok: Boolean(payload.ok), error: payload.error};
   },
 
   // ---- AI ----

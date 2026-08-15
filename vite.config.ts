@@ -11,7 +11,7 @@ import {createApi} from './server/index';
  * Bridging them lets a key live in a gitignored `.env.local` instead of having
  * to be exported in whatever shell happens to start the dev server.
  */
-const SERVER_ONLY = ['ANTHROPIC_API_KEY'];
+const SERVER_ONLY = ['ANTHROPIC_API_KEY', 'SLACK_WEBHOOK_URL'];
 
 /**
  * The API runs inside the dev server rather than as a second process.
