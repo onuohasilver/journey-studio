@@ -88,6 +88,37 @@ describe('running a journey', () => {
     expect(sent[0].body).toEqual({email: 'typed@example.com'});
   });
 
+  it('resolves a config value that is itself a template', async () => {
+    // This is how every imported document chains: a path parameter defaults to
+    // `{{vars.petId}}`, so resolving only the request would send the literal
+    // placeholder in the URL.
+    const defs: Record<string, NodeDef> = {
+      'demo.byId': {
+        type: 'demo.byId',
+        label: 'By id',
+        fields: [{key: 'petId', label: 'petId', kind: 'text'}],
+        defaults: {petId: '{{vars.petId}}'},
+        request: {method: 'GET', path: '/pets/{{fields.petId}}'},
+        needs: ['petId'],
+        gives: [],
+      },
+      'control.set': {type: 'control.set', label: 'Set', fields: [], control: 'set', needs: [], gives: []},
+    };
+    const {transport, sent} = stubTransport({'GET /pets/7': {status: 200, body: {id: 7}}});
+    const j: Journey = {
+      name: 'chain',
+      nodes: [
+        {id: 's1', type: 'control.set', config: {values: {petId: 7}}, position: {x: 0, y: 0}},
+        {id: 's2', type: 'demo.byId', config: {}, position: {x: 250, y: 0}},
+      ],
+      edges: [{id: 'e1', source: 's1', target: 's2'}],
+    };
+    const result = await runJourney(j, {env: 'test', lookup: (t) => defs[t], transport});
+
+    expect(sent[0].url).toBe('/pets/7');
+    expect(result.passed).toBe(true);
+  });
+
   it('stops at the first failed assertion instead of running on', async () => {
     // Continuing past a failure produces a cascade of errors that all look real.
     const {transport, sent} = stubTransport({...OK, 'POST /users': {status: 500, body: {}}});
@@ -216,5 +247,37 @@ describe('checking a journey before it runs', () => {
     const j = journey();
     j.nodes.push({id: 'n3', type: 'gone.node', config: {}, position: {x: 0, y: 0}});
     expect(checkJourney(j, lookup).some((p) => p.kind === 'unknown-type')).toBe(true);
+  });
+});
+
+describe('nodes that only know their outputs once configured', () => {
+  it('counts what a Set values step gives, so a good journey is not flagged', () => {
+    // Without this the pre-run check warns on a perfectly correct journey,
+    // which is worse than not checking at all.
+    const defs: Record<string, NodeDef> = {
+      'control.set': {
+        type: 'control.set', label: 'Set', fields: [], control: 'set',
+        givesFrom: 'values', needs: [], gives: [],
+      },
+      'demo.needsIt': {
+        type: 'demo.needsIt', label: 'Needs it', fields: [],
+        request: {method: 'GET', path: '/x/{{vars.petId}}'},
+        needs: ['petId'], gives: [],
+      },
+    };
+    const j: Journey = {
+      name: 'set-then-use',
+      nodes: [
+        {id: 's1', type: 'control.set', config: {values: {petId: 1}}, position: {x: 0, y: 0}},
+        {id: 's2', type: 'demo.needsIt', config: {}, position: {x: 250, y: 0}},
+      ],
+      edges: [{id: 'e1', source: 's1', target: 's2'}],
+    };
+
+    expect(checkJourney(j, (t) => defs[t])).toEqual([]);
+
+    // …and it still catches the case where nothing sets it.
+    j.nodes[0].config = {values: {}};
+    expect(checkJourney(j, (t) => defs[t])[0]).toMatchObject({nodeId: 's2', kind: 'missing-context'});
   });
 });

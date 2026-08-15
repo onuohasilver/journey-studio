@@ -81,7 +81,13 @@ export function buildRequest(
   ctx: RunContext,
 ): ResolvedRequest | undefined {
   if (!def.request) return undefined;
-  const cfg = settings(def, node);
+
+  // Config is resolved against the context *first*, because a field's value is
+  // itself commonly a template: an imported path parameter defaults to
+  // `{{vars.petId}}`, and that is the entire mechanism by which an imported
+  // document chains. Resolving only the request would put the literal
+  // `{{vars.petId}}` in the URL.
+  const cfg = resolve(settings(def, node), ctx) as Record<string, unknown>;
 
   // Config values are visible to templates as `{{fields.x}}` and, for
   // convenience, by bare name when they do not collide with a context var.

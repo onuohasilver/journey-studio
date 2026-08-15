@@ -130,6 +130,14 @@ export function checkJourney(journey: Journey, lookup: DefLookup): Problem[] {
       }
     }
     for (const give of def.gives) available.add(give.key);
+    // Nodes that only know their outputs once configured — "Set values" gives
+    // whatever keys you typed into it.
+    if (def.givesFrom) {
+      const declared = node.config?.[def.givesFrom];
+      if (declared && typeof declared === 'object') {
+        for (const key of Object.keys(declared)) available.add(key);
+      }
+    }
   }
   return problems;
 }

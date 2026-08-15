@@ -1,0 +1,10 @@
+{
+  "$comment": "Environments and auth for this project. Secrets belong in journey.config.local.json (gitignored) or in JOURNEY_SECRET_* environment variables.",
+  "environments": [
+    {"name": "demo", "baseUrl": "https://petstore3.swagger.io/api/v3"},
+    {"name": "local", "baseUrl": "http://localhost:3000"}
+  ],
+  "auth": {
+    "bearer": {"type": "bearer", "token": "${env:API_TOKEN}"}
+  }
+}

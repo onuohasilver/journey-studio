@@ -108,6 +108,14 @@ export interface NodeDef {
   control?: ControlKind;
   needs: string[];
   gives: Produces[];
+  /**
+   * Config key whose object keys are *also* things this node gives.
+   *
+   * Some nodes only know what they produce once configured — "Set values" gives
+   * whatever you typed into it. Without this the pre-run check would warn that a
+   * perfectly good journey is missing context, which is worse than not checking.
+   */
+  givesFrom?: string;
   assertions?: Assertion[];
   /** The gotcha. The most valuable line a definition can carry. */
   notes?: string;

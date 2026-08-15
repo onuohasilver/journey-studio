@@ -114,6 +114,62 @@ describe('importing an OpenAPI document', () => {
     expect(byId('getPet').gives).toEqual([{key: 'petId', from: 'body.id'}]);
   });
 
+  it('resolves the same $ref more than once', () => {
+    // Cycle detection must be scoped to the current chain. Sharing one seen-set
+    // across the document empties every use after the first — in the real
+    // Swagger Petstore that silently blanks the body of POST /pet, because
+    // PUT /pet referenced the same schema a moment earlier.
+    const twice = importOpenApi(`
+openapi: 3.0.0
+info: {title: Twice}
+paths:
+  /thing:
+    put:
+      operationId: updateThing
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}
+      responses: {"200": {description: ok}}
+    post:
+      operationId: createThing
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}
+      responses: {"201": {description: made}}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        name: {type: string, example: widget}
+`);
+    const put = twice.nodes.find((n) => n.type.endsWith('updateThing'))!;
+    const post = twice.nodes.find((n) => n.type.endsWith('createThing'))!;
+    expect(put.defaults!.body).toEqual({name: 'widget'});
+    expect(post.defaults!.body).toEqual({name: 'widget'});
+  });
+
+  it('still breaks a genuine cycle', () => {
+    const cyclic = importOpenApi(`
+openapi: 3.0.0
+info: {title: Cyclic}
+paths:
+  /node:
+    post:
+      operationId: makeNode
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/Node"}}}
+      responses: {"201": {description: ok}}
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        name: {type: string}
+        parent: {$ref: "#/components/schemas/Node"}
+`);
+    expect(cyclic.ok).toBe(true);
+    expect(cyclic.nodes[0].defaults!.body).toEqual({name: '', parent: ''});
+  });
+
   it('asserts the status the spec documents', () => {
     expect(byId('createPet').assertions).toEqual([{op: 'status', expected: 201}]);
     expect(byId('deletePet').assertions).toEqual([{op: 'status', expected: 204}]);

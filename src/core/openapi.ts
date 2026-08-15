@@ -16,18 +16,25 @@ const METHODS: Method[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPT
 
 type Doc = Record<string, any>;
 
-/** Resolve local `#/...` refs. Remote refs are reported, not fetched. */
-function deref(node: any, doc: Doc, seen = new Set<string>()): any {
+/**
+ * Resolve local `#/...` refs. Remote refs are reported, not fetched.
+ *
+ * `seen` tracks the *current chain* only, so it breaks genuine cycles
+ * (Pet -> Category -> Pet) without treating a schema's second honest use as
+ * one. Sharing one set across the whole document silently empties everything
+ * after the first occurrence — in the Swagger Petstore that is `POST /pet`,
+ * whose body would import as blank because `PUT /pet` referenced Pet first.
+ */
+function deref(node: any, doc: Doc, seen: ReadonlySet<string> = new Set()): any {
   if (!node || typeof node !== 'object') return node;
   if (typeof node.$ref === 'string') {
     const ref: string = node.$ref;
     if (!ref.startsWith('#/') || seen.has(ref)) return {};
-    seen.add(ref);
     let target: any = doc;
     for (const seg of ref.slice(2).split('/')) {
       target = target?.[seg.replace(/~1/g, '/').replace(/~0/g, '~')];
     }
-    return deref(target, doc, seen);
+    return deref(target, doc, new Set(seen).add(ref));
   }
   if (Array.isArray(node)) return node.map((n) => deref(n, doc, seen));
   const out: Record<string, unknown> = {};
