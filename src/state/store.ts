@@ -14,6 +14,7 @@ import {applyOps, buildChain, type AppliedChange} from '../core/ai/apply';
 import {buildCanvasIndex, buildJourneyDigest, buildNodeIndex} from '../core/ai/grounding';
 import {validateEdit, validatePlan} from '../core/ai/validate';
 import {requestExplanation, requestPlan, requestRevision, type Explanation} from '../core/ai/client';
+import {createHistory} from './history';
 import type {HttpResponse, ImportResult, Journey, JourneyNode, NodeDef, NodeState, ResolvedRequest} from '../core/types';
 
 /** Public config, fetched once at boot. Values never leave the server. */
@@ -51,10 +52,17 @@ interface StudioState {
   explanation: Explanation | null;
   explaining: boolean;
 
+  /** Labels for the next undo/redo, so the buttons can say what they'll do. */
+  undoLabel?: string;
+  redoLabel?: string;
+
   init(): Promise<void>;
   setEnv(env: string): void;
   setRail(rail: Rail): void;
   select(id: string | null): void;
+
+  undo(): void;
+  redo(): void;
 
   addNode(type: string, position?: {x: number; y: number}): void;
   updateConfig(id: string, patch: Record<string, unknown>): void;
@@ -105,7 +113,45 @@ function lookupFor(journey: Journey) {
 
 let abort: AbortController | undefined;
 
-export const useStudio = create<StudioState>((set, get) => ({
+const history = createHistory<Journey>();
+
+export const useStudio = create<StudioState>((set, get) => {
+  /** History labels, renamed so they don't collide with the undo/redo actions. */
+  const labels = () => {
+    const {undo, redo} = history.peek();
+    return {undoLabel: undo, redoLabel: redo};
+  };
+
+  /**
+   * The one door every journey change goes through.
+   *
+   * Recording the snapshot here rather than in each action is what keeps undo
+   * honest: a mutation added later is undoable by construction, instead of being
+   * undoable only if someone remembered to wire it up.
+   */
+  const mutate = (label: string, next: (journey: Journey) => Journey, coalesceKey?: string) => {
+    const before = get().journey;
+    const after = next(before);
+    if (after === before) return;
+    history.push(before, label, coalesceKey);
+    set({journey: after, ...labels()});
+  };
+
+  const restore = (moved: {state: Journey; label: string} | undefined, verb: string) => {
+    if (!moved) return;
+    const {selectedId, logs} = get();
+    // Run results are keyed by node id and deliberately left alone: undo should
+    // put the canvas back, not throw away responses you already paid for. A node
+    // that comes back brings its old result with it.
+    set({
+      journey: moved.state,
+      selectedId: moved.state.nodes.some((n) => n.id === selectedId) ? selectedId : null,
+      logs: [...logs, `↶ ${verb} ${moved.label}`],
+      ...labels(),
+    });
+  };
+
+  return {
   journey: EMPTY,
   states: {},
   logs: [],
@@ -133,64 +179,79 @@ export const useStudio = create<StudioState>((set, get) => ({
   setRail: (rail) => set({rail}),
   select: (selectedId) => set({selectedId, rail: selectedId ? 'inspector' : get().rail}),
 
+  undo: () => restore(history.undo(get().journey), 'undid'),
+  redo: () => restore(history.redo(get().journey), 'redid'),
+
   addNode(type, position) {
     const def = registryLookup(type);
     if (!def) return;
-    const {journey} = get();
-    const id = `n${journey.nodes.length + 1}_${Math.random().toString(36).slice(2, 6)}`;
-    const node: JourneyNode = {
-      id,
-      type,
-      label: def.label,
-      config: {...(def.defaults ?? {})},
-      position: position ?? {x: 60 + journey.nodes.length * 40, y: 120 + journey.nodes.length * 30},
-    };
-    set({journey: {...journey, nodes: [...journey.nodes, node]}, selectedId: id, rail: 'inspector'});
+    const id = `n${get().journey.nodes.length + 1}_${Math.random().toString(36).slice(2, 6)}`;
+    mutate(`add ${def.label}`, (journey) => ({
+      ...journey,
+      nodes: [
+        ...journey.nodes,
+        {
+          id,
+          type,
+          label: def.label,
+          config: {...(def.defaults ?? {})},
+          position: position ?? {x: 60 + journey.nodes.length * 40, y: 120 + journey.nodes.length * 30},
+        } satisfies JourneyNode,
+      ],
+    }));
+    set({selectedId: id, rail: 'inspector'});
   },
 
   updateConfig(id, patch) {
-    const {journey} = get();
-    set({
-      journey: {
+    // Coalesced per field, so typing a path is one undo step rather than one
+    // per character.
+    const key = `${id}:${Object.keys(patch).join(',')}`;
+    mutate(
+      'edit settings',
+      (journey) => ({
         ...journey,
         nodes: journey.nodes.map((n) => (n.id === id ? {...n, config: {...n.config, ...patch}} : n)),
-      },
-    });
+      }),
+      key,
+    );
   },
 
   renameNode(id, label) {
-    const {journey} = get();
-    set({journey: {...journey, nodes: journey.nodes.map((n) => (n.id === id ? {...n, label} : n))}});
+    mutate(
+      'rename step',
+      (journey) => ({...journey, nodes: journey.nodes.map((n) => (n.id === id ? {...n, label} : n))}),
+      `${id}:label`,
+    );
   },
 
   deleteNode(id) {
-    const {journey, selectedId} = get();
-    set({
-      journey: {
-        ...journey,
-        nodes: journey.nodes.filter((n) => n.id !== id),
-        edges: journey.edges.filter((e) => e.source !== id && e.target !== id),
-      },
-      selectedId: selectedId === id ? null : selectedId,
-    });
+    const label = get().journey.nodes.find((n) => n.id === id)?.label ?? 'step';
+    mutate(`delete ${label}`, (journey) => ({
+      ...journey,
+      nodes: journey.nodes.filter((n) => n.id !== id),
+      edges: journey.edges.filter((e) => e.source !== id && e.target !== id),
+    }));
+    if (get().selectedId === id) set({selectedId: null});
   },
 
-  setJourney: (journey) => set({journey}),
+  setJourney: (journey) => mutate('replace journey', () => journey),
 
   connect(source, target) {
-    const {journey} = get();
-    if (journey.edges.some((e) => e.source === source && e.target === target)) return;
-    set({
-      journey: {
-        ...journey,
-        edges: [...journey.edges, {id: `e_${Math.random().toString(36).slice(2, 8)}`, source, target}],
-      },
-    });
+    mutate('connect steps', (journey) =>
+      journey.edges.some((e) => e.source === source && e.target === target)
+        ? journey
+        : {
+            ...journey,
+            edges: [...journey.edges, {id: `e_${Math.random().toString(36).slice(2, 8)}`, source, target}],
+          },
+    );
   },
 
   moveNode(id, position) {
-    const {journey} = get();
-    set({journey: {...journey, nodes: journey.nodes.map((n) => (n.id === id ? {...n, position} : n))}});
+    mutate('move step', (journey) => ({
+      ...journey,
+      nodes: journey.nodes.map((n) => (n.id === id ? {...n, position} : n)),
+    }));
   },
 
   async run(startAt) {
@@ -255,6 +316,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     const gone = new Set(removePack(slug));
     const {journey} = get();
     // Nodes whose type just disappeared would be unrunnable, so drop them too.
+    // Deliberately not undoable: undo restores the journey, not the registry, so
+    // the steps would come back as unknown types. Re-import the document instead.
     const nodes = journey.nodes.filter((n) => !gone.has(n.type));
     const keep = new Set(nodes.map((n) => n.id));
     set({
@@ -276,10 +339,14 @@ export const useStudio = create<StudioState>((set, get) => ({
     const validated = validatePlan(raw, registryLookup);
     if (!validated.steps.length) throw new Error('The plan came back with no usable steps. Try describing it differently.');
 
+    // A rebuild is a single undoable step: one Cmd+Z puts back whatever was
+    // there before you asked.
+    history.push(get().journey, 'build with AI');
     set({
       journey: {...buildChain(validated.steps, registryLookup), name: get().journey.name},
       states: {},
       selectedId: null,
+      ...labels(),
       aiTurns: [
         {
           id: Math.random().toString(36).slice(2, 8),
@@ -311,8 +378,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const validated = validateEdit(raw, journey, registryLookup);
     const result = applyOps(journey, validated.ops, registryLookup);
 
+    // One AI turn is one undo step, however many nodes it touched — this is the
+    // case undo exists for.
+    history.push(journey, validated.summary || 'AI edit');
     set({
       journey: result.journey,
+      ...labels(),
       // States are deliberately kept: an edit must not throw away results for
       // steps it never touched.
       selectedId: result.touched.length === 1 ? result.touched[0] : null,
@@ -356,5 +427,20 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
   },
 
-  resetConversation: () => set({aiTurns: []}),
-}));
+    resetConversation: () => set({aiTurns: []}),
+  };
+});
+
+/** Test seam — history lives outside the store, so it needs clearing too. */
+export function resetStudio(): void {
+  history.clear();
+  useStudio.setState({
+    journey: EMPTY,
+    states: {},
+    logs: [],
+    selectedId: null,
+    aiTurns: [],
+    undoLabel: undefined,
+    redoLabel: undefined,
+  });
+}

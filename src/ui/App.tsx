@@ -45,6 +45,10 @@ function Topbar({onImport}: {onImport: () => void}) {
   const stop = useStudio((s) => s.stop);
   const running = useStudio((s) => s.running);
   const hasNodes = useStudio((s) => s.journey.nodes.length > 0);
+  const undo = useStudio((s) => s.undo);
+  const redo = useStudio((s) => s.redo);
+  const undoLabel = useStudio((s) => s.undoLabel);
+  const redoLabel = useStudio((s) => s.redoLabel);
 
   const toggle = (target: Rail) => setRail(rail === target ? 'inspector' : target);
 
@@ -62,6 +66,24 @@ function Topbar({onImport}: {onImport: () => void}) {
       </div>
 
       <div className="tools">
+        <button
+          className="tool"
+          onClick={undo}
+          disabled={!undoLabel}
+          title={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
+          aria-label={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
+        >
+          ↶
+        </button>
+        <button
+          className="tool"
+          onClick={redo}
+          disabled={!redoLabel}
+          title={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
+          aria-label={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
+        >
+          ↷
+        </button>
         <button className="tool" onClick={onImport}>Import</button>
         <button className="tool" aria-pressed={rail === 'packs'} onClick={() => toggle('packs')}>Documents</button>
         <button className="tool" aria-pressed={rail === 'ai'} onClick={() => toggle('ai')}>Build with AI</button>
@@ -84,6 +106,30 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+
+      // Inside a text field the browser's own undo is the right one — stealing
+      // Cmd+Z there would wipe a half-typed URL instead of undoing a canvas edit.
+      const el = document.activeElement;
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        (el instanceof HTMLElement && el.isContentEditable)
+      ) {
+        return;
+      }
+
+      e.preventDefault();
+      const {undo, redo} = useStudio.getState();
+      if (e.shiftKey) redo();
+      else undo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="app">

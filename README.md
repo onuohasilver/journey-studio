@@ -106,12 +106,15 @@ does not.
 ## Development
 
 ```bash
-npm test        # 89 tests, no network
+npm test        # 108 tests, no network
 npm run typecheck
 npm run build
 ```
 
 In dev, `window.studio` exposes the store for poking at from the console.
+
+`Cmd/Ctrl+Z` undoes, `Cmd/Ctrl+Shift+Z` redoes. Inside a text field the browser's own undo is left
+alone, so a half-typed URL is never traded for a canvas edit.
 
 ## Roadmap
 
@@ -121,8 +124,8 @@ In dev, `window.studio` exposes the store for poking at from the console.
 - [x] Credential proxy — server-side secrets, per-environment base URLs, named auth schemes
 - [x] Canvas, palette, inspector, logs
 - [x] AI — build a journey, edit it in place, explain it
+- [x] Undo/redo — coalesced per field, one step per AI edit
 - [ ] Save and load journeys to disk
-- [ ] Undo/redo
 - [ ] Webhook inbox for async steps
 - [ ] Assertion editor in the inspector
 - [ ] CLI runner, so a saved journey becomes a CI check
