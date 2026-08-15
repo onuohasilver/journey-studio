@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {resetStudio, useStudio} from '../src/state/store';
 import {lookup, register, resetRegistry} from '../src/core/registry';
 import {applyOps} from '../src/core/ai/apply';
@@ -145,5 +145,43 @@ describe('undo and redo through the store', () => {
     s().undo();
     expect(s().journey.nodes).toHaveLength(1);
     expect(s().journey.nodes[0].config.name).toBe('');
+  });
+});
+
+describe('provenance survives opening and re-saving', () => {
+  it('keeps the sources of a journey that was opened rather than imported', async () => {
+    // Re-saving in a session that imported nothing used to drop `sources`,
+    // quietly breaking the "re-import to update" path.
+    resetStudio();
+
+    const sources = [{slug: 'petstore', title: 'Swagger Petstore', format: 'openapi'}];
+    const saved = {
+      version: 1,
+      name: 'Pets',
+      savedAt: 'then',
+      journey: {name: 'Pets', nodes: [], edges: []},
+      defs: [],
+      sources,
+    };
+
+    let written: {sources?: unknown} | undefined;
+    const fetchMock = vi.fn(async (url: string, init?: {method?: string; body?: string}) => {
+      if (init?.method === 'PUT') {
+        written = JSON.parse(init.body!);
+        return {ok: true, json: async () => ({ok: true})};
+      }
+      if (url.endsWith('/snapshot')) return {ok: false, json: async () => ({})};
+      if (url === '/api/journeys') return {ok: true, json: async () => []};
+      return {ok: true, json: async () => saved};
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await useStudio.getState().openJourney('pets.journey.json');
+    expect(useStudio.getState().sources).toEqual(sources);
+
+    await useStudio.getState().saveJourney('Pets');
+    expect(written?.sources).toEqual(sources);
+
+    vi.unstubAllGlobals();
   });
 });

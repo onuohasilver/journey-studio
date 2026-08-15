@@ -329,5 +329,12 @@
       ],
       "destructive": false
     }
+  ],
+  "sources": [
+    {
+      "slug": "swagger-petstore-openapi-3-0",
+      "title": "Swagger Petstore - OpenAPI 3.0",
+      "format": "openapi"
+    }
   ]
 }

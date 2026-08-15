@@ -17,7 +17,7 @@ import {requestExplanation, requestPlan, requestRevision, type Explanation} from
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
-import {fileNameFor, packJourney, readSaved} from '../core/persist';
+import {fileNameFor, packJourney, readSaved, type SavedJourney} from '../core/persist';
 import type {
   HttpResponse,
   ImportResult,
@@ -82,6 +82,9 @@ interface StudioState {
   /** Recorded response shapes this journey is being compared against. */
   baseline: Record<string, Shape> | null;
   recordedAt: string | null;
+  /** Where an opened journey's definitions came from, kept so re-saving it does
+   *  not throw the provenance away in a session that imported nothing. */
+  sources: SavedJourney['sources'];
 
   /** Labels for the next undo/redo, so the buttons can say what they'll do. */
   undoLabel?: string;
@@ -209,6 +212,7 @@ export const useStudio = create<StudioState>((set, get) => {
   slackConfigured: false,
   baseline: null,
   recordedAt: null,
+  sources: undefined,
 
   async init() {
     try {
@@ -455,7 +459,12 @@ export const useStudio = create<StudioState>((set, get) => {
     const saved = packJourney({...journey, name}, registryLookup, {
       description,
       env,
-      sources: packs.map((p) => ({slug: p.slug, title: p.title, format: p.format})),
+      // Packs from this session take precedence, but a journey that was opened
+      // rather than imported has no packs — and dropping its provenance would
+      // quietly break the "re-import to update" path on every open-and-save.
+      sources: packs.length
+        ? packs.map((p) => ({slug: p.slug, title: p.title, format: p.format}))
+        : get().sources,
     });
 
     const res = await fetch(`/api/journeys/${encodeURIComponent(fileNameFor(name))}`, {
@@ -503,6 +512,7 @@ export const useStudio = create<StudioState>((set, get) => {
       rail: 'inspector',
       baseline,
       recordedAt,
+      sources: result.saved.sources,
       logs: [
         `opened "${result.saved.name}"`,
         ...(result.saved.journey.cases?.length ? [`${result.saved.journey.cases.length} cases`] : []),
