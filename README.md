@@ -80,13 +80,40 @@ A journey you can save is a test. A journey you can run on a schedule is a suite
 ```bash
 npx journey run                       # every saved journey, default environment
 npx journey run signup --env staging  # one journey, somewhere specific
+npx journey run --data users.csv      # once per row of a spreadsheet
 npx journey run --repeat 5            # run five times and name the flaky steps
 npx journey run --report qa.json      # write the evidence
 npx journey run --slack               # post the result
-npx journey run --strict-contract     # fail when a response stops matching the spec
+npx journey run -u                    # record what the responses look like now
+npx journey run --strict              # fail on drift, not just on assertions
 ```
 
 Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
+
+### Data-driven runs — one journey, twenty tests
+
+A journey with cases runs once per row, and each row seeds the context before the first step — so
+`{{vars.country}}` in a step picks up that row's value with no other wiring.
+
+```
+name,country,amount
+domestic,US,100
+nigeria,NG,50000
+sanctioned,KP,100
+```
+
+Paste that into the Cases rail, or point the CLI at the file with `--data`. The rows almost always
+already exist in a spreadsheet, which is why the editor takes CSV rather than making you retype into
+a grid.
+
+**A failing case does not stop the others.** Inside a journey, stopping at the first failure is right
+— step four cannot work without the id step three never created. Across cases it is exactly wrong:
+they are independent, and a suite that reports "row 3 failed" and goes home makes you re-run it once
+per broken row to learn there were four.
+
+One check exists because the failure is otherwise silent: if a step **sets** a variable the cases
+also supply, every row runs against that step's value and all of them go green having tested one
+case. The studio names the step before you run, and the CLI prints it even under `--quiet`.
 
 ### Contract checking — the assertions nobody has to write
 
@@ -102,11 +129,39 @@ something you are shipping deliberately, and the point is that you find out eith
 responses are checked: an error body was never meant to match the 2xx schema, and one false finding
 is all it takes for people to stop reading the report.
 
+### Response snapshots — drift detection for APIs with no spec
+
+Contract checking needs a schema. Most APIs do not have one: every Postman collection arrives without
+any, and plenty of OpenAPI documents describe a response as a bare `object`. For those, the best
+description of the contract is what the API returned last time it was known good.
+
+So each run records the **shape** of every success — each path and its type — and compares later runs
+against it:
+
+```bash
+npx journey run -u        # record the shapes as they are now
+npx journey run           # compare, and report what moved
+npx journey run --strict  # …and fail the build on it
+```
+
+Not the values: ids, timestamps and balances change every run, and a check that fires on those gets
+turned off in a week. Shapes hold still.
+
+The severities encode who breaks. A field that disappeared or changed type breaks every consumer
+reading it today — error. A field that stopped always being present breaks the ones that assumed it —
+warning. A new field breaks nobody — information. Reporting additions as failures is how a snapshot
+suite becomes something people delete.
+
+Snapshots live in `snapshots/`, one file per journey, meant to be committed. A shape change arriving
+as a diff in a pull request is the point: it turns "the API changed under us" from something found in
+production into a line somebody approved.
+
 ### What a report carries
 
 Per step: status, HTTP code, timing, the failing assertion, and — for failures — the exact request
-that was sent, so it reproduces. Per journey: the values the run captured, which is to say **the
-records it created on a shared environment**. Plus anywhere the API stopped matching its spec.
+that was sent, so it reproduces. Per journey (or per case): the values the run captured, which is to
+say **the records it created on a shared environment**. Plus anywhere the API stopped matching its
+spec, or changed shape since it was recorded.
 
 Response bodies are left out by default (`--include-bodies` opts in): they routinely hold tokens and
 personal data, and reports get pasted into channels.
@@ -162,7 +217,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 146 tests, no network
+npm test        # 186 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -185,9 +240,11 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Contract checking against the imported spec
 - [x] QA report — evidence, created data, contract drift
 - [x] CLI runner with exit codes, `--repeat` flake detection, and Slack delivery
-- [ ] Data-driven runs — one journey over a table of inputs
-- [ ] Response snapshots, to catch drift in APIs with no spec
+- [x] Data-driven runs — one journey over a table of inputs, from CSV
+- [x] Response snapshots, to catch drift in APIs with no spec
 - [ ] Teardown tracking, so a suite can clean up what it created
+- [ ] Timing budgets — fail when a step gets slower than its SLO
+- [ ] Environment comparison — run the same journey against two and diff
 - [ ] Webhook inbox for async steps
 - [ ] Assertion editor in the inspector
 

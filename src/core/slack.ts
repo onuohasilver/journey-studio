@@ -13,7 +13,7 @@
 //   text over 3000 characters, so a 40-journey suite has to summarise rather
 //   than be cut off mid-sentence by the API.
 
-import type {QaReport} from './report';
+import {journeyTitle, summariseDrift, type QaReport} from './report';
 
 const MAX_BLOCKS = 45;
 const MAX_TEXT = 2900;
@@ -45,6 +45,9 @@ function escape(text: string): string {
 export function formatReport(report: QaReport, meta: {title?: string; link?: string} = {}): SlackMessage {
   const {totals} = report;
   const ok = report.status === 'passed';
+  // A data-driven suite runs one journey many times, so "12 journeys" would be
+  // wrong where "12 runs" is what happened.
+  const unit = report.journeys.some((j) => j.case) ? 'runs' : 'journeys';
   const headline = `${ok ? '✅' : '🔴'} ${meta.title ?? 'API journeys'} — ${
     ok ? 'all passing' : `${totals.failed} of ${totals.journeys} failing`
   }`;
@@ -55,20 +58,25 @@ export function formatReport(report: QaReport, meta: {title?: string; link?: str
       type: 'section',
       fields: [
         {type: 'mrkdwn', text: `*Environment*\n${escape(report.env)}`},
-        {type: 'mrkdwn', text: `*Journeys*\n${totals.passed} passed · ${totals.failed} failed`},
+        {
+          type: 'mrkdwn',
+          text: `*${unit === 'runs' ? 'Runs' : 'Journeys'}*\n${totals.passed} passed · ${totals.failed} failed`,
+        },
         {type: 'mrkdwn', text: `*Steps*\n${totals.steps}`},
         {type: 'mrkdwn', text: `*Took*\n${(report.durationMs / 1000).toFixed(1)}s`},
       ],
     },
   ];
 
-  // Contract drift gets its own line even when everything passed — a response
-  // that stopped matching its spec is news whether or not a test caught it.
-  if (totals.contractBreaks) {
+  // Drift gets its own line even when everything passed — a response that
+  // stopped matching its spec, or changed shape since it was recorded, is news
+  // whether or not a test caught it.
+  const drifted = summariseDrift(totals);
+  if (drifted) {
     blocks.push(
       section(
-        `:warning: *${totals.contractBreaks} response${totals.contractBreaks === 1 ? '' : 's'} no longer match the spec.* ` +
-          `Assertions still pass, so nothing failed — but a consumer may already be broken.`,
+        `:warning: *${escape(drifted)}.* Assertions still pass, so nothing failed — but a consumer may ` +
+          `already be broken.`,
       ),
     );
   }
@@ -86,7 +94,7 @@ export function formatReport(report: QaReport, meta: {title?: string; link?: str
           )}${where}`;
         })
         .join('\n');
-      blocks.push(section(`*${escape(journey.name)}*\n${detail || '• failed'}`));
+      blocks.push(section(`*${escape(journeyTitle(journey))}*\n${detail || '• failed'}`));
     }
     if (failures.length > MAX_FAILURES_SHOWN) {
       blocks.push(section(`…and ${failures.length - MAX_FAILURES_SHOWN} more failing journeys.`));

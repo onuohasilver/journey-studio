@@ -167,6 +167,10 @@ export interface NodeState {
   sent?: ResolvedRequest;
   /** Where the response departed from the schema the document declared. */
   contract?: import('./contract').ContractFinding[];
+  /** The structural fingerprint of this response, for recording as a baseline. */
+  shape?: import('./snapshot').Shape;
+  /** Where the shape moved since it was recorded. */
+  shapeChanges?: import('./snapshot').ShapeChange[];
 }
 
 export interface ResolvedRequest {
@@ -192,11 +196,26 @@ export interface JourneyEdge {
   target: string;
 }
 
+/**
+ * One row of inputs to run the whole journey against.
+ *
+ * The same three steps against twelve rows of a spreadsheet is twelve tests for
+ * the price of one, and it is where the interesting failures live: the journey
+ * that works for a domestic transfer and falls over on the one to Nigeria.
+ */
+export interface JourneyCase {
+  name: string;
+  /** Seeded into the run context before the first step, as if a step gave them. */
+  vars: Record<string, unknown>;
+}
+
 export interface Journey {
   name: string;
   description?: string;
   nodes: JourneyNode[];
   edges: JourneyEdge[];
+  /** Run once per case when present, otherwise once with no seed. */
+  cases?: JourneyCase[];
 }
 
 // ---- importing ----

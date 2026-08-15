@@ -12,7 +12,7 @@
 //   it pins the contract as it was the day you saved it, which is exactly what
 //   a regression test should do — if the spec later changes, that is the news
 
-import type {Journey, NodeDef} from './types';
+import type {Journey, JourneyCase, NodeDef} from './types';
 
 export const FILE_VERSION = 1;
 
@@ -65,6 +65,19 @@ function isJourney(value: unknown): value is Journey {
 }
 
 /**
+ * Cases arrive from a pasted spreadsheet, so the file may hold anything. A case
+ * without a usable `vars` object would seed nothing and quietly run the journey
+ * against the defaults — a green row that tested the wrong thing.
+ */
+function readCases(raw: unknown): JourneyCase[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const cases = raw
+    .filter((c): c is JourneyCase => Boolean(c) && typeof c === 'object' && typeof (c as JourneyCase).vars === 'object')
+    .map((c, i) => ({name: String(c.name ?? `case ${i + 1}`), vars: {...c.vars}}));
+  return cases.length ? cases : undefined;
+}
+
+/**
  * Read a saved journey.
  *
  * Definitions in the file are the authority: a journey saved against yesterday's
@@ -105,7 +118,11 @@ export function readSaved(text: string, registered: (type: string) => NodeDef | 
       description: saved.description,
       savedAt: saved.savedAt ?? new Date().toISOString(),
       env: saved.env,
-      journey: {...saved.journey, name: saved.name ?? saved.journey.name},
+      journey: {
+        ...saved.journey,
+        name: saved.name ?? saved.journey.name,
+        cases: readCases(saved.journey.cases),
+      },
       defs: saved.defs ?? [],
       sources: saved.sources,
     },

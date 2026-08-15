@@ -1,5 +1,9 @@
 import {useState} from 'react';
 import {topoOrder} from '../core/graph';
+import {summariseContract} from '../core/contract';
+import {summariseShape} from '../core/snapshot';
+import {summariseDrift} from '../core/report';
+import {casesFromCsv, casesToCsv} from '../core/csv';
 import {useStudio} from '../state/store';
 
 /** Plain-English account of what the journey on the canvas actually does. */
@@ -111,8 +115,12 @@ export function ReportPanel() {
   const slackConfigured = useStudio((s) => s.slackConfigured);
   const sendReportToSlack = useStudio((s) => s.sendReportToSlack);
   const select = useStudio((s) => s.select);
+  const recordSnapshot = useStudio((s) => s.recordSnapshot);
+  const recordedAt = useStudio((s) => s.recordedAt);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<{ok: boolean; error?: string} | null>(null);
+  const [recorded, setRecorded] = useState<{ok: boolean; error?: string; nodes?: number} | null>(null);
+  const [shown, setShown] = useState<number | null>(null);
 
   if (!report) {
     return (
@@ -123,7 +131,6 @@ export function ReportPanel() {
     );
   }
 
-  const journey = report.journeys[0];
   const download = () => {
     const blob = new Blob([JSON.stringify(report, null, 2)], {type: 'application/json'});
     const url = URL.createObjectURL(blob);
@@ -134,21 +141,52 @@ export function ReportPanel() {
     URL.revokeObjectURL(url);
   };
 
+  // With cases the panel opens on the row somebody needs to look at.
+  const cased = report.journeys.length > 1 || Boolean(report.journeys[0]?.case);
+  const failedFirst = report.journeys.findIndex((j) => j.status === 'failed');
+  // A later run with fewer cases must not leave the panel pointing past the end.
+  const picked = shown !== null && shown < report.journeys.length ? shown : Math.max(failedFirst, 0);
+  const journey = report.journeys[picked];
+  const drift = summariseDrift(report.totals);
+
   return (
     <div className="rail-body">
       <div className={`note ${report.status === 'passed' ? 'info' : 'bad'}`}>
-        <strong>{report.status === 'passed' ? 'Passed' : 'Failed'}</strong> · {report.totals.steps} steps ·{' '}
-        {(report.durationMs / 1000).toFixed(1)}s · {report.env}
+        <strong>{report.status === 'passed' ? 'Passed' : 'Failed'}</strong> ·{' '}
+        {cased ? `${report.totals.passed}/${report.totals.journeys} cases · ` : ''}
+        {report.totals.steps} steps · {(report.durationMs / 1000).toFixed(1)}s · {report.env}
       </div>
 
-      {report.totals.contractBreaks > 0 && (
+      {drift && (
         <div className="note warn">
-          {report.totals.contractBreaks} response{report.totals.contractBreaks === 1 ? '' : 's'} no longer
-          match the spec. Assertions still pass, so nothing failed — but a consumer may already be broken.
+          {drift}. Assertions still pass, so nothing failed — but a consumer may already be broken.
         </div>
       )}
 
-      <span className="caps">Steps</span>
+      {cased && (
+        <>
+          <span className="caps">Cases</span>
+          {report.journeys.map((j, i) => (
+            <button
+              key={`${j.name}-${j.case ?? i}`}
+              className={`step ${j.status}`}
+              aria-pressed={j === journey}
+              onClick={() => setShown(i)}
+            >
+              <span className="ic" />
+              <span className="tx">
+                {j.case ?? j.name}
+                <span className="ty">
+                  {j.steps.filter((s) => s.status === 'passed').length}/{j.steps.length} steps ·{' '}
+                  {(j.durationMs / 1000).toFixed(1)}s
+                </span>
+              </span>
+            </button>
+          ))}
+        </>
+      )}
+
+      <span className="caps">{journey?.case ? `Steps · ${journey.case}` : 'Steps'}</span>
       {journey?.steps.map((step) => (
         <button key={step.id} className={`step ${step.status}`} onClick={() => select(step.id)}>
           <span className="ic" />
@@ -157,7 +195,8 @@ export function ReportPanel() {
             <span className="ty">
               {step.httpStatus ? `${step.httpStatus} · ` : ''}
               {step.durationMs ?? 0}ms
-              {step.contract.length ? ` · ${step.contract.length} contract finding(s)` : ''}
+              {step.contract.length ? ` · ${summariseContract(step.contract)}` : ''}
+              {step.shapeChanges.length ? ` · ${summariseShape(step.shapeChanges)}` : ''}
             </span>
             {step.error && <span className="ty" style={{color: 'var(--danger)'}}>{step.error}</span>}
           </span>
@@ -166,10 +205,21 @@ export function ReportPanel() {
 
       {journey?.contractBreaks ? (
         <>
-          <span className="caps">Contract</span>
+          <span className="caps">Against the spec</span>
           {journey.steps.flatMap((s) => s.contract).map((finding, i) => (
             <div key={i} className={`note ${finding.severity === 'error' ? 'warn' : 'info'}`}>
               {finding.message}
+            </div>
+          ))}
+        </>
+      ) : null}
+
+      {journey?.steps.some((s) => s.shapeChanges.length) ? (
+        <>
+          <span className="caps">Since it was recorded</span>
+          {journey.steps.flatMap((s) => s.shapeChanges).map((change, i) => (
+            <div key={i} className={`note ${change.severity === 'error' ? 'warn' : 'info'}`}>
+              {change.message}
             </div>
           ))}
         </>
@@ -185,6 +235,17 @@ export function ReportPanel() {
       ) : null}
 
       <div className="btn-row">
+        <button
+          className="btn"
+          title={
+            recordedAt
+              ? `Replace the shapes recorded ${recordedAt.slice(0, 10)}`
+              : 'Record what these responses look like, and compare every later run against it'
+          }
+          onClick={async () => setRecorded(await recordSnapshot())}
+        >
+          {recordedAt ? 'Re-record shapes' : 'Record shapes'}
+        </button>
         <button className="btn" onClick={download}>Download JSON</button>
         <button
           className="btn go"
@@ -206,6 +267,96 @@ export function ReportPanel() {
         </p>
       )}
       {sent && <div className={`note ${sent.ok ? 'info' : 'bad'}`}>{sent.ok ? 'Posted to Slack.' : sent.error}</div>}
+      {recorded && (
+        <div className={`note ${recorded.ok ? 'info' : 'bad'}`}>
+          {recorded.ok
+            ? `Recorded ${recorded.nodes} response shapes. Later runs are compared against them.`
+            : recorded.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The table of inputs the journey runs against — the difference between one test
+ * and twenty. Editing is a CSV textarea on purpose: the rows almost always exist
+ * in a spreadsheet already, and a bespoke grid you have to retype into is how a
+ * data-driven suite ends up with three cases in it.
+ */
+export function CasesPanel() {
+  const journey = useStudio((s) => s.journey);
+  const setCases = useStudio((s) => s.setCases);
+  const cases = journey.cases ?? [];
+
+  const [draft, setDraft] = useState<string | null>(null);
+  const text = draft ?? (cases.length ? casesToCsv(cases) : '');
+  const parsed = casesFromCsv(text);
+
+  return (
+    <div className="rail-body">
+      {cases.length === 0 && (
+        <p className="help">
+          Run this journey once per row. The first row names the variables, and each row after it seeds a
+          run — so <code>{'{{vars.country}}'}</code> in a step picks up that row's value.
+        </p>
+      )}
+
+      <div className="field">
+        <label htmlFor="cases-csv">Cases</label>
+        <textarea
+          id="cases-csv"
+          rows={10}
+          spellCheck={false}
+          value={text}
+          placeholder={'name,country,amount\nnigeria,NG,1000\nghana,GH,250'}
+          onChange={(e) => setDraft(e.target.value)}
+          style={{fontFamily: 'var(--mono)', fontSize: 11.5}}
+        />
+        <span className="help">Paste straight from a spreadsheet. A <code>name</code> column names the row.</span>
+      </div>
+
+      {parsed.warnings.map((w, i) => (
+        <div key={i} className="note warn">{w}</div>
+      ))}
+
+      {parsed.cases.length > 0 && (
+        <div className="note info">
+          {parsed.cases.length} case{parsed.cases.length === 1 ? '' : 's'} ·{' '}
+          {parsed.columns.join(', ') || 'no variables'}
+        </div>
+      )}
+
+      <div className="btn-row">
+        <button
+          className="btn go"
+          disabled={draft === null}
+          onClick={() => {
+            setCases(parsed.cases);
+            setDraft(null);
+          }}
+        >
+          Use these cases
+        </button>
+        {cases.length > 0 && (
+          <button
+            className="btn danger"
+            onClick={() => {
+              setCases(undefined);
+              setDraft('');
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      {cases.length > 0 && (
+        <p className="help">
+          A failing case does not stop the others — every row runs, and the report lists them all. The canvas
+          shows the first row that failed.
+        </p>
+      )}
     </div>
   );
 }
@@ -252,7 +403,10 @@ export function SavedPanel() {
         <div className="pack" key={item.file}>
           <div className="nm">{item.name}</div>
           <div className="sub">
-            {item.steps} steps{item.savedAt ? ` · ${item.savedAt.slice(0, 10)}` : ''}
+            {item.steps} steps
+            {item.cases ? ` · ${item.cases} cases` : ''}
+            {item.snapshot ? ' · shapes recorded' : ''}
+            {item.savedAt ? ` · ${item.savedAt.slice(0, 10)}` : ''}
           </div>
           <div className="btn-row" style={{marginTop: 8}}>
             <button

@@ -8,12 +8,14 @@
 
 import {runAssertions, describeFailure} from './assert';
 import {checkContract, summariseContract, type ContractOptions} from './contract';
+import {diffShape, shapeOf, summariseShape, type Shape} from './snapshot';
 import {downstreamOf, topoOrder} from './graph';
 import {readResponse, resolve} from './template';
 import type {
   Assertion,
   HttpResponse,
   Journey,
+  JourneyCase,
   JourneyNode,
   NodeDef,
   NodeState,
@@ -50,6 +52,12 @@ export interface RunOptions {
   contract?: ContractOptions;
   /** Treat a contract break as a step failure. Off by default. */
   strictContract?: boolean;
+  /** Recorded response shapes by node id, to compare this run against. */
+  baseline?: Record<string, Shape>;
+  /** Treat a shape break as a step failure. Off by default. */
+  strictSnapshot?: boolean;
+  /** Context values to start with — one row of a data-driven run. */
+  seed?: Record<string, unknown>;
 }
 
 export interface RunResult {
@@ -58,10 +66,17 @@ export interface RunResult {
   passed: boolean;
 }
 
-function newContext(env: string, priorResponses: Record<string, HttpResponse> = {}): RunContext {
+function newContext(
+  env: string,
+  priorResponses: Record<string, HttpResponse> = {},
+  seed: Record<string, unknown> = {},
+): RunContext {
   return {
     env,
-    vars: {},
+    // A case's values are seeded exactly as if an earlier step had produced
+    // them, which is why data-driven runs need no support anywhere else: an
+    // imported `/pets/{petId}` node already reads `{{vars.petId}}`.
+    vars: {...seed},
     responses: {...priorResponses},
     secretNames: [],
     runId: `run_${Date.now().toString(36)}`,
@@ -167,7 +182,7 @@ async function runControl(
 
 export async function runJourney(journey: Journey, opts: RunOptions): Promise<RunResult> {
   const {env, lookup, transport, hooks, signal} = opts;
-  const ctx = newContext(env, opts.priorResponses);
+  const ctx = newContext(env, opts.priorResponses, opts.seed);
   const states: Record<string, NodeState> = {};
 
   // Reusing an earlier run's responses is what makes "run from here" cheap —
@@ -248,17 +263,35 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         : [];
       const contractBreaks = contract.filter((f) => f.severity === 'error');
 
+      // The shape is recorded for every success whether or not a baseline
+      // exists, so recording one after the fact never needs another run — and
+      // for the many APIs that published no schema at all, this is the only
+      // description of the contract there is.
+      const shape = success ? shapeOf(res.body) : undefined;
+      const recorded = opts.baseline?.[node.id];
+      const shapeChanges = shape && recorded ? diffShape(recorded, shape) : [];
+      const shapeBreaks = shapeChanges.filter((c) => c.severity === 'error');
+
+      const drifted =
+        (opts.strictContract && contractBreaks.length) || (opts.strictSnapshot && shapeBreaks.length);
+      const driftError = [
+        ...(opts.strictContract ? contractBreaks : []),
+        ...(opts.strictSnapshot ? shapeBreaks : []),
+      ].map((f) => f.message);
+
       const state: NodeState = {
-        status: failed.length || (opts.strictContract && contractBreaks.length) ? 'failed' : 'passed',
+        status: failed.length || drifted ? 'failed' : 'passed',
         response: res,
         assertions,
         sent: request,
         durationMs: Date.now() - started,
         ...(contract.length ? {contract} : {}),
+        ...(shape ? {shape} : {}),
+        ...(shapeChanges.length ? {shapeChanges} : {}),
         ...(failed.length
           ? {error: failed.map(describeFailure).join('; ')}
-          : opts.strictContract && contractBreaks.length
-            ? {error: contractBreaks.map((f) => f.message).join('; ')}
+          : drifted
+            ? {error: driftError.join('; ')}
             : {}),
       };
       states[node.id] = state;
@@ -271,10 +304,15 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       }
 
       extract(def.gives, res, ctx, hooks?.onLog);
-      // A passing step that drifted from its contract still says so — that is
-      // usually the most interesting line in the whole run.
-      const drift = contractBreaks.length ? ` · ⚠ ${summariseContract(contract)}` : '';
-      hooks?.onLog?.(`✓ ${label} · ${res.status} · ${res.durationMs}ms${drift}`);
+      // A passing step that drifted still says so — that is usually the most
+      // interesting line in the whole run.
+      const drift = [
+        contractBreaks.length ? summariseContract(contract) : '',
+        shapeBreaks.length ? summariseShape(shapeChanges) : '',
+      ].filter(Boolean);
+      hooks?.onLog?.(
+        `✓ ${label} · ${res.status} · ${res.durationMs}ms${drift.length ? ` · ⚠ ${drift.join(', ')}` : ''}`,
+      );
       hooks?.onNodeEnd?.(node.id, state);
       hooks?.onContext?.(ctx);
     } catch (err) {
@@ -292,4 +330,44 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
   }
 
   return {context: ctx, states, passed};
+}
+
+export interface CaseRun {
+  /** Absent when the journey has no cases and ran once, plainly. */
+  case?: JourneyCase;
+  result: RunResult;
+}
+
+/**
+ * Run a journey once per case.
+ *
+ * The one decision worth stating: a failing case does **not** stop the others.
+ * Inside a journey, stopping at the first failure is right — step four cannot
+ * work without the id step three never created. Across cases it is exactly
+ * wrong: the cases are independent, and a suite that reports "row 3 failed" and
+ * goes home makes you re-run it once per broken row to learn there were four.
+ */
+export async function runJourneyCases(journey: Journey, opts: RunOptions): Promise<CaseRun[]> {
+  const cases = journey.cases ?? [];
+  if (!cases.length) return [{result: await runJourney(journey, opts)}];
+
+  const runs: CaseRun[] = [];
+  for (const one of cases) {
+    if (opts.signal?.aborted) break;
+    opts.hooks?.onLog?.(`▸ ${one.name}`);
+    runs.push({
+      case: one,
+      result: await runJourney(journey, {...opts, seed: {...opts.seed, ...one.vars}}),
+    });
+  }
+  return runs;
+}
+
+/** The shapes a run observed, ready to be written as the new baseline. */
+export function shapesFrom(states: Record<string, NodeState>): Record<string, Shape> {
+  const out: Record<string, Shape> = {};
+  for (const [id, state] of Object.entries(states)) {
+    if (state.shape) out[id] = state.shape;
+  }
+  return out;
 }

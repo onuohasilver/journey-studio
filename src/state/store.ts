@@ -5,7 +5,7 @@
 // inspector can never disagree about what happened.
 
 import {create} from 'zustand';
-import {runJourney, type Transport} from '../core/engine';
+import {runJourneyCases, shapesFrom, type Transport} from '../core/engine';
 import {materialise} from '../core/builtins';
 import {topoOrder} from '../core/graph';
 import {allDefs, lookup as registryLookup, register, registerPack, removePack, allPacks, type Pack} from '../core/registry';
@@ -16,8 +16,18 @@ import {validateEdit, validatePlan} from '../core/ai/validate';
 import {requestExplanation, requestPlan, requestRevision, type Explanation} from '../core/ai/client';
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
+import type {Shape} from '../core/snapshot';
 import {fileNameFor, packJourney, readSaved} from '../core/persist';
-import type {HttpResponse, ImportResult, Journey, JourneyNode, NodeDef, NodeState, ResolvedRequest} from '../core/types';
+import type {
+  HttpResponse,
+  ImportResult,
+  Journey,
+  JourneyCase,
+  JourneyNode,
+  NodeDef,
+  NodeState,
+  ResolvedRequest,
+} from '../core/types';
 
 /** Public config, fetched once at boot. Values never leave the server. */
 export interface ClientConfig {
@@ -37,7 +47,7 @@ export interface AiTurn {
   problems: string[];
 }
 
-export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved';
+export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved' | 'data';
 
 export interface SavedSummary {
   name: string;
@@ -45,6 +55,8 @@ export interface SavedSummary {
   description?: string;
   savedAt: string;
   steps: number;
+  cases: number;
+  snapshot: boolean;
 }
 
 interface StudioState {
@@ -66,6 +78,10 @@ interface StudioState {
   report: QaReport | null;
   saved: SavedSummary[];
   slackConfigured: boolean;
+
+  /** Recorded response shapes this journey is being compared against. */
+  baseline: Record<string, Shape> | null;
+  recordedAt: string | null;
 
   /** Labels for the next undo/redo, so the buttons can say what they'll do. */
   undoLabel?: string;
@@ -92,6 +108,9 @@ interface StudioState {
 
   importText(text: string, filename?: string): ImportResult;
   removeImported(slug: string): void;
+
+  setCases(cases: JourneyCase[] | undefined): void;
+  recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
 
   refreshSaved(): Promise<void>;
   saveJourney(name: string, description?: string): Promise<void>;
@@ -188,6 +207,8 @@ export const useStudio = create<StudioState>((set, get) => {
   report: null,
   saved: [],
   slackConfigured: false,
+  baseline: null,
+  recordedAt: null,
 
   async init() {
     try {
@@ -301,12 +322,13 @@ export const useStudio = create<StudioState>((set, get) => {
     const startedAt = Date.now();
     set({running: true, states: startAt ? states : {}, logs: []});
 
-    const result = await runJourney(journey, {
+    const runs = await runJourneyCases(journey, {
       env,
       lookup: lookupFor(journey),
       transport,
       startAt,
       priorResponses,
+      baseline: get().baseline ?? undefined,
       signal: abort.signal,
       hooks: {
         onNodeStart: (id) => set({states: {...get().states, [id]: {status: 'running'}}}),
@@ -315,20 +337,38 @@ export const useStudio = create<StudioState>((set, get) => {
       },
     });
 
-    const finalStates = {...get().states, ...result.states};
-    const journeyReport = buildJourneyReport(journey, finalStates, result.context, lookupFor(journey));
+    // The canvas can only show one run. With cases it shows the first that
+    // failed, because that is the one anybody opens the inspector for; with none
+    // it shows the only run there was.
+    const shown = runs.find((r) => !r.result.passed) ?? runs[runs.length - 1];
+    const finalStates = {...get().states, ...(shown?.result.states ?? {})};
+
+    const journeyReports = runs.map((run) =>
+      buildJourneyReport(journey, run.result.states, run.result.context, lookupFor(journey), {
+        caseName: run.case?.name,
+      }),
+    );
+
+    const failedCases = runs.filter((r) => !r.result.passed).length;
+    const tail = runs.length > 1
+      ? `— ${runs.length} cases · ${runs.length - failedCases} passed${
+          failedCases ? `, showing "${shown?.case?.name}"` : ''
+        }`
+      : shown?.result.passed
+        ? '— run complete'
+        : '— run stopped at the first failure';
 
     set({
       running: false,
       states: finalStates,
       // Every run produces a report, not just a colour on the canvas — it is
       // what gets exported, posted, and read the next morning.
-      report: buildReport(env, [journeyReport], {
+      report: buildReport(env, journeyReports, {
         startedAt: new Date(startedAt).toISOString(),
         durationMs: Date.now() - startedAt,
         baseUrl: get().config.environments.find((e) => e.name === env)?.baseUrl,
       }),
-      logs: [...get().logs, result.passed ? '— run complete' : '— run stopped at the first failure'],
+      logs: [...get().logs, tail],
     });
   },
 
@@ -364,6 +404,38 @@ export const useStudio = create<StudioState>((set, get) => {
       packs: allPacks(),
       journey: {...journey, nodes, edges: journey.edges.filter((e) => keep.has(e.source) && keep.has(e.target))},
     });
+  },
+
+  // ---- data-driven runs and snapshots ----
+
+  setCases(cases) {
+    // Undoable like any other edit: pasting the wrong spreadsheet over a curated
+    // set of cases should cost one Cmd+Z, not a re-import.
+    mutate('change cases', (journey) => ({...journey, cases: cases?.length ? cases : undefined}));
+  },
+
+  async recordSnapshot() {
+    const {journey, states, env} = get();
+    const nodes = shapesFrom(states);
+    if (!Object.keys(nodes).length) {
+      return {ok: false, error: 'Run the journey first — there are no responses to record.'};
+    }
+
+    const res = await fetch(`/api/journeys/${encodeURIComponent(fileNameFor(journey.name))}/snapshot`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({nodes, env, journey: journey.name}),
+    });
+    const payload = (await res.json()) as {ok?: boolean; error?: string; nodes?: number};
+    if (!payload.ok) return {ok: false, error: payload.error ?? 'could not record'};
+
+    set({
+      baseline: nodes,
+      recordedAt: new Date().toISOString(),
+      logs: [...get().logs, `recorded ${payload.nodes} response shapes`],
+    });
+    await get().refreshSaved();
+    return {ok: true, nodes: payload.nodes};
   },
 
   // ---- saved journeys ----
@@ -408,13 +480,34 @@ export const useStudio = create<StudioState>((set, get) => {
     // when the document they came from was never imported in this session.
     if (result.saved.defs.length) register(result.saved.defs);
 
+    // A recorded baseline comes along with the journey, so the next run compares
+    // against it without anyone opting in — the same way `jest` does.
+    let baseline: Record<string, Shape> | null = null;
+    let recordedAt: string | null = null;
+    try {
+      const snap = await fetch(`/api/journeys/${encodeURIComponent(file)}/snapshot`);
+      if (snap.ok) {
+        const loaded = (await snap.json()) as {nodes: Record<string, Shape>; recordedAt?: string};
+        baseline = loaded.nodes;
+        recordedAt = loaded.recordedAt ?? null;
+      }
+    } catch {
+      /* no baseline is the normal case, not an error */
+    }
+
     set({
       journey: result.saved.journey,
       states: {},
       report: null,
       selectedId: null,
       rail: 'inspector',
-      logs: [`opened "${result.saved.name}"`],
+      baseline,
+      recordedAt,
+      logs: [
+        `opened "${result.saved.name}"`,
+        ...(result.saved.journey.cases?.length ? [`${result.saved.journey.cases.length} cases`] : []),
+        ...(baseline ? [`comparing against ${Object.keys(baseline).length} recorded shapes`] : []),
+      ],
     });
     history.clear();
     set(labels());

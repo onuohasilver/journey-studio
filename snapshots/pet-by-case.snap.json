@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "journey": "Pet by case",
+  "recordedAt": "2026-08-15T17:34:26.012Z",
+  "env": "demo",
+  "nodes": {
+    "s1": {
+      "id": "number",
+      "name": "string",
+      "photoUrls": "array",
+      "photoUrls.*": "string",
+      "tags": "array",
+      "status": "string"
+    }
+  }
+}

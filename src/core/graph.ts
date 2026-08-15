@@ -91,7 +91,7 @@ export function downstreamOf(startId: string, edges: JourneyEdge[]): Set<string>
 
 export interface Problem {
   nodeId: string;
-  kind: 'missing-context' | 'unknown-type' | 'cycle';
+  kind: 'missing-context' | 'unknown-type' | 'cycle' | 'case-overwritten';
   message: string;
 }
 
@@ -109,7 +109,11 @@ export function checkJourney(journey: Journey, lookup: DefLookup): Problem[] {
     problems.push({nodeId: id, kind: 'cycle', message: 'This step is part of a loop, so the run order is undefined.'});
   }
 
-  const available = new Set<string>();
+  // Case variables are seeded before the first step, so they count as available
+  // and a later step writing one of them is worth flagging.
+  const caseKeys = new Set((journey.cases ?? []).flatMap((c) => Object.keys(c.vars)));
+  const available = new Set<string>(caseKeys);
+
   for (const node of topoOrder(journey.nodes, journey.edges)) {
     const def = lookup(node.type);
     if (!def) {
@@ -130,13 +134,39 @@ export function checkJourney(journey: Journey, lookup: DefLookup): Problem[] {
       }
     }
     for (const give of def.gives) available.add(give.key);
-    // Nodes that only know their outputs once configured — "Set values" gives
-    // whatever keys you typed into it.
+
+    // Keys written from the node's own config — "Set values" gives whatever you
+    // typed into it. These are the ones that can shadow a case, because they are
+    // literals written *before* anything downstream reads them.
+    //
+    // `gives` is deliberately not included: those are extracted from a response,
+    // so they land after the step that used the case value, and a `GET /pet/{id}`
+    // writing `petId` back from its own body is ordinary chaining. Warning about
+    // it would put a false finding in front of every imported journey.
+    const written: string[] = [];
     if (def.givesFrom) {
       const declared = node.config?.[def.givesFrom];
       if (declared && typeof declared === 'object') {
-        for (const key of Object.keys(declared)) available.add(key);
+        for (const key of Object.keys(declared)) {
+          available.add(key);
+          written.push(key);
+        }
       }
+    }
+
+    // The quiet disaster of a data-driven run: you paste twelve rows of `petId`,
+    // a step sets `petId` to a constant, and all twelve rows test the same
+    // record. Every row goes green and the suite has covered one case. Nothing
+    // else catches this — the run is working exactly as written.
+    const clobbered = written.filter((key) => caseKeys.has(key));
+    if (clobbered.length) {
+      problems.push({
+        nodeId: node.id,
+        kind: 'case-overwritten',
+        message:
+          `Sets ${clobbered.map((k) => `"${k}"`).join(', ')}, which every case also supplies — this step wins, ` +
+          `so the cases will all run against the same value.`,
+      });
     }
   }
   return problems;

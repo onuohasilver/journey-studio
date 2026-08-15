@@ -2,7 +2,7 @@
   "version": 1,
   "name": "Pet lookup",
   "description": "Sets a known pet id, reads it back, then lists available pets.",
-  "savedAt": "2026-08-15T16:31:15.929Z",
+  "savedAt": "2026-08-15T17:15:30.586Z",
   "env": "demo",
   "journey": {
     "name": "Pet lookup",
@@ -328,13 +328,6 @@
         }
       ],
       "destructive": false
-    }
-  ],
-  "sources": [
-    {
-      "slug": "swagger-petstore-openapi-3-0",
-      "title": "Swagger Petstore - OpenAPI 3.0",
-      "format": "openapi"
     }
   ]
 }
