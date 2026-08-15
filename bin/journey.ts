@@ -13,22 +13,32 @@
 //   journey run --slack                  post the result
 //   journey run -u                       record what the responses look like now
 //   journey run --strict                 fail on drift, not just on assertions
+//   journey compare --env staging --with prod   the same journey, both sides
 //
 // Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
 
 import {readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
-import {runJourneyCases, shapesFrom, type Transport} from '../src/core/engine';
+import {runJourney, runJourneyCases, shapesFrom, type Transport} from '../src/core/engine';
 import {register, lookup, resetRegistry} from '../src/core/registry';
 import {BUILTINS} from '../src/core/builtins';
 import {casesFromCsv} from '../src/core/csv';
 import {checkJourney} from '../src/core/graph';
-import {buildJourneyReport, buildReport, findFlakes, summariseText, type JourneyReport, type QaReport} from '../src/core/report';
+import {
+  buildJourneyReport,
+  buildReport,
+  findFlakes,
+  findSlowSteps,
+  summariseText,
+  type JourneyReport,
+  type QaReport,
+} from '../src/core/report';
+import {compareRuns, summariseComparison} from '../src/core/compare';
 import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from '../server/config';
 import {sendRequest} from '../server/proxy';
 import {listJourneys, loadJourney, loadSnapshot, saveSnapshot} from '../server/journeys';
-import type {ResolvedRequest} from '../src/core/types';
+import type {Journey, NodeState, ResolvedRequest} from '../src/core/types';
 
 interface Options {
   names: string[];
@@ -39,7 +49,9 @@ interface Options {
   slack: boolean;
   strictContract: boolean;
   strictSnapshot: boolean;
+  strictBudget: boolean;
   updateSnapshots: boolean;
+  with?: string;
   includeBodies: boolean;
   quiet: boolean;
 }
@@ -51,6 +63,7 @@ function parseArgs(argv: string[]): Options {
     slack: false,
     strictContract: false,
     strictSnapshot: false,
+    strictBudget: false,
     updateSnapshots: false,
     includeBodies: false,
     quiet: false,
@@ -65,9 +78,15 @@ function parseArgs(argv: string[]): Options {
       case '--slack': options.slack = true; break;
       case '--strict-contract': options.strictContract = true; break;
       case '--strict-snapshot': options.strictSnapshot = true; break;
+      case '--strict-budget': options.strictBudget = true; break;
+      case '--with': options.with = argv[++i]; break;
       // One flag for "any drift is a failure", because that is the thing people
-      // actually want and nobody remembers two flags for it.
-      case '--strict': options.strictContract = true; options.strictSnapshot = true; break;
+      // actually want and nobody remembers three flags for it.
+      case '--strict':
+        options.strictContract = true;
+        options.strictSnapshot = true;
+        options.strictBudget = true;
+        break;
       case '-u':
       case '--update-snapshots': options.updateSnapshots = true; break;
       case '--include-bodies': options.includeBodies = true; break;
@@ -91,8 +110,14 @@ const USAGE = `journey run [names…] [options]
   --strict              fail on drift — contract or shape — not just assertions
   --strict-contract     fail only on a response that stopped matching the spec
   --strict-snapshot     fail only on a response whose shape moved
+  --strict-budget       fail only on a step slower than its declared budget
   --include-bodies      keep response bodies for failures in the JSON report
   --quiet               only print the verdict
+
+journey compare [names…] --env <a> --with <b>
+
+  Runs each journey against both environments and prints only where they
+  disagree: statuses, response shapes, and steps one side is much slower at.
 `;
 
 async function runOnce(options: Options, root: string): Promise<QaReport> {
@@ -172,6 +197,7 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       strictContract: options.strictContract,
       // Recording and comparing at once would make every run agree with itself.
       strictSnapshot: options.strictSnapshot && !options.updateSnapshots,
+      strictBudget: options.strictBudget,
       hooks: options.quiet ? undefined : {onLog: (line) => process.stdout.write(`  ${line}\n`)},
     });
 
@@ -203,19 +229,85 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
   });
 }
 
+/** Run every wanted journey in one environment, keeping the raw states. */
+async function runIn(env: string, options: Options, root: string) {
+  const config = loadConfig(root);
+  if (!config.environments.some((e) => e.name === env)) {
+    throw new Error(`No environment called "${env}". Known: ${config.environments.map((e) => e.name).join(', ')}`);
+  }
+  const transport: Transport = {
+    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
+  };
+
+  const available = await listJourneys(root);
+  const wanted = options.names.length
+    ? available.filter((j) => options.names.some((n) => j.name === n || j.file === n || j.file === `${n}.journey.json`))
+    : available;
+
+  const out: {journey: Journey; states: Record<string, NodeState>; lookup: typeof lookup}[] = [];
+  for (const summary of wanted) {
+    const saved = await loadJourney(root, summary.file);
+    if (!saved) continue;
+    resetRegistry();
+    register(BUILTINS);
+    register(saved.defs);
+    const result = await runJourney(saved.journey, {env, lookup, transport});
+    out.push({journey: saved.journey, states: result.states, lookup});
+  }
+  return out;
+}
+
+/**
+ * Run the same journeys against two environments and print the disagreements.
+ *
+ * "It works on staging" is the oldest bug report there is, and it is hard to act
+ * on because nobody has the two runs side by side.
+ */
+async function compare(options: Options, root: string): Promise<number> {
+  const a = options.env;
+  const b = options.with;
+  if (!a || !b) {
+    process.stderr.write('compare needs both --env <a> and --with <b>.\n');
+    return 2;
+  }
+
+  // Sequential rather than parallel: the two runs create data, and interleaving
+  // them across environments makes any ordering bug impossible to reason about.
+  const left = await runIn(a, options, root);
+  const right = await runIn(b, options, root);
+
+  let differing = 0;
+  for (const [i, side] of left.entries()) {
+    const other = right[i];
+    if (!other) continue;
+    const comparison = compareRuns(
+      side.journey,
+      {env: a, states: side.states},
+      {env: b, states: other.states},
+      side.lookup,
+    );
+    if (comparison.differences.some((d) => d.severity === 'error')) differing += 1;
+    process.stdout.write(`\n${summariseComparison(comparison)}\n`);
+  }
+
+  return differing ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === 'help' || command === '--help') {
     process.stdout.write(USAGE);
     return 0;
   }
-  if (command !== 'run') {
+  if (command !== 'run' && command !== 'compare') {
     process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
     return 2;
   }
 
   const options = parseArgs(rest);
   const root = process.cwd();
+
+  if (command === 'compare') return compare(options, root);
 
   const attempts: QaReport[] = [];
   for (let i = 0; i < options.repeat; i++) {
@@ -228,6 +320,9 @@ async function main(): Promise<number> {
   // that wastes a whole morning.
   const report = attempts[attempts.length - 1];
   if (attempts.length > 1) report.flaky = findFlakes(attempts);
+  // Budgets are judged across every run and every case, not on one sample.
+  const slow = findSlowSteps(attempts);
+  if (slow.length) report.slow = slow;
 
   process.stdout.write(`\n${summariseText(report)}\n`);
 
@@ -249,7 +344,10 @@ async function main(): Promise<number> {
   }
 
   // Flaky steps are a failure even when the last attempt happened to be green.
-  return report.status === 'passed' && !report.flaky?.length ? 0 : 1;
+  // A blown budget is only a failure when asked for — otherwise one slow
+  // afternoon turns the build red and the budget gets deleted.
+  const budgetFails = options.strictBudget && report.slow?.length;
+  return report.status === 'passed' && !report.flaky?.length && !budgetFails ? 0 : 1;
 }
 
 main()

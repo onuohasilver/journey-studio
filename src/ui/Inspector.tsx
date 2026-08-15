@@ -81,6 +81,8 @@ export function Inspector() {
   const deleteNode = useStudio((s) => s.deleteNode);
   const run = useStudio((s) => s.run);
   const running = useStudio((s) => s.running);
+  const setTeardown = useStudio((s) => s.setTeardown);
+  const setBudget = useStudio((s) => s.setBudget);
 
   const node = journey.nodes.find((n) => n.id === selectedId);
   const problems = checkJourney(journey, lookup);
@@ -148,6 +150,39 @@ export function Inspector() {
           {field.help && <span className="help">{field.help}</span>}
         </div>
       ))}
+
+      <span className="caps">When it runs, and how fast</span>
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={Boolean(node.teardown)}
+          onChange={(e) => setTeardown(node.id, e.target.checked)}
+        />
+        <span>
+          Clean-up step
+          <span className="help">
+            Runs after the journey, whether it passed or failed — the failed run is the one that left
+            records behind. A clean-up that fails is reported, not counted against the journey.
+          </span>
+        </span>
+      </label>
+
+      <div className="field">
+        <label htmlFor="node-budget">Time budget (ms)</label>
+        <input
+          id="node-budget"
+          type="number"
+          min={0}
+          placeholder="no budget"
+          value={node.budgetMs ?? ''}
+          onChange={(e) => setBudget(node.id, e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+        <span className="help">
+          Judged at p95 across every run and case, so one cold start does not turn the suite red. Reported
+          unless the run is strict.
+        </span>
+      </div>
 
       <div className="btn-row">
         <button className="btn go" disabled={running} onClick={() => run(node.id)}>

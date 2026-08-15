@@ -86,6 +86,7 @@ npx journey run --report qa.json      # write the evidence
 npx journey run --slack               # post the result
 npx journey run -u                    # record what the responses look like now
 npx journey run --strict              # fail on drift, not just on assertions
+npx journey compare --env a --with b  # the same journey against two environments
 ```
 
 Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
@@ -156,6 +157,67 @@ Snapshots live in `snapshots/`, one file per journey, meant to be committed. A s
 as a diff in a pull request is the point: it turns "the API changed under us" from something found in
 production into a line somebody approved.
 
+### Cleaning up after yourself
+
+Mark a step as a **clean-up step** and it runs after the journey, *whether the journey passed or
+failed*. That condition is the whole feature: the failed run is precisely the one that created an
+account and then fell over before the step that deletes it, so cleanup that only happens on success
+cleans up exactly when there was nothing to clean.
+
+Clean-up is best effort. One failing cleanup step does not stop the others — if deleting the order
+fails, the account it belongs to should still be attempted — and a failed cleanup does **not** turn
+the journey red. The API under test may have behaved perfectly; what broke is test hygiene. It gets
+its own line instead:
+
+```
+✓ Pet with cleanup
+  ✓ Create a pet · 200 (22ms)
+  ✓ Read it back · 200 (2ms)
+  ✓ ⌫ Delete the pet · 200 (2ms)
+  created: petId=987654321
+```
+
+Clean-up steps are skipped when a run is stopped: firing deletes at an environment after somebody hit
+stop is the opposite of what they asked for.
+
+### Timing budgets
+
+A step can declare how long it is allowed to take. The verdict is taken at **p95 across every run and
+every case**, not on a single sample — one cold start is not an SLO breach, and failing on it
+produces exactly the flakiness this tool exists to name.
+
+```
+Over budget:
+  ⏱ Pet with cleanup · Read it back — p95 456ms against 300ms (p50 455ms, max 456ms, 3 runs)
+```
+
+Reported by default; `--strict-budget` (or `--strict`) makes it fail the build.
+
+### Comparing two environments
+
+"It works on staging" is the oldest bug report there is, and it is hard to act on because nobody has
+the two runs side by side.
+
+```bash
+npx journey compare signup --env staging --with prod
+```
+
+It runs the journey in both and prints only where they disagree:
+
+```
+✗ Pet with cleanup · local vs local-next — 7 differences
+  Read it back
+    ✗ id is number on local and string on local-next.
+    ~ region comes back on local-next but not on local.
+    ~ local-next is 604.0× slower here (1ms vs 604ms).
+```
+
+Values are ignored — ids and balances differ between environments by definition, and that is what
+makes them different environments. What should not differ is the contract. A field only one side
+returns is a finding here even though it is noise against a recorded baseline: it usually means the
+two are running different builds. Timing is only mentioned when one side is both relatively *and*
+absolutely worse, so a 3ms/8ms endpoint stays quiet.
+
 ### What a report carries
 
 Per step: status, HTTP code, timing, the failing assertion, and — for failures — the exact request
@@ -217,7 +279,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 186 tests, no network
+npm test        # 204 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -242,10 +304,11 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] CLI runner with exit codes, `--repeat` flake detection, and Slack delivery
 - [x] Data-driven runs — one journey over a table of inputs, from CSV
 - [x] Response snapshots, to catch drift in APIs with no spec
-- [ ] Teardown tracking, so a suite can clean up what it created
-- [ ] Timing budgets — fail when a step gets slower than its SLO
-- [ ] Environment comparison — run the same journey against two and diff
+- [x] Clean-up steps that run whether the journey passed or failed
+- [x] Timing budgets, judged at p95 across runs and cases
+- [x] Environment comparison — the same journey against two, diffed
 - [ ] Webhook inbox for async steps
+- [ ] Scheduled runs with a history, so drift has a timeline
 - [ ] Assertion editor in the inspector
 
 ## License

@@ -113,6 +113,8 @@ interface StudioState {
   removeImported(slug: string): void;
 
   setCases(cases: JourneyCase[] | undefined): void;
+  setTeardown(id: string, teardown: boolean): void;
+  setBudget(id: string, budgetMs: number | undefined): void;
   recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
 
   refreshSaved(): Promise<void>;
@@ -416,6 +418,27 @@ export const useStudio = create<StudioState>((set, get) => {
     // Undoable like any other edit: pasting the wrong spreadsheet over a curated
     // set of cases should cost one Cmd+Z, not a re-import.
     mutate('change cases', (journey) => ({...journey, cases: cases?.length ? cases : undefined}));
+  },
+
+  setTeardown(id, teardown) {
+    mutate(teardown ? 'mark as clean-up' : 'unmark clean-up', (journey) => ({
+      ...journey,
+      nodes: journey.nodes.map((n) => (n.id === id ? {...n, teardown: teardown || undefined} : n)),
+    }));
+  },
+
+  setBudget(id, budgetMs) {
+    mutate(
+      'change time budget',
+      (journey) => ({
+        ...journey,
+        nodes: journey.nodes.map((n) =>
+          n.id === id ? {...n, budgetMs: budgetMs && budgetMs > 0 ? budgetMs : undefined} : n,
+        ),
+      }),
+      // Typing "1500" is four keystrokes, not four undo steps.
+      `budget:${id}`,
+    );
   },
 
   async recordSnapshot() {

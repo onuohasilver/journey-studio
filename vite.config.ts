@@ -42,6 +42,15 @@ export default defineConfig(({mode}) => {
 
   return {
     plugins: [react(), apiPlugin()],
-    server: {port: Number(process.env.PORT) || 5180},
+    server: {
+      port: Number(process.env.PORT) || 5180,
+      // Vite rejects requests whose Host it does not recognise, which is the
+      // right default — it is what stops a public tunnel from reaching a dev
+      // server by accident. Set TUNNEL=1 to allow ngrok hosts specifically,
+      // rather than reaching for `true` and allowing every host there is.
+      ...(process.env.TUNNEL
+        ? {allowedHosts: ['.ngrok-free.app', '.ngrok-free.dev', '.ngrok.app', '.ngrok.io']}
+        : {}),
+    },
   };
 });

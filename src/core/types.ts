@@ -171,6 +171,10 @@ export interface NodeState {
   shape?: import('./snapshot').Shape;
   /** Where the shape moved since it was recorded. */
   shapeChanges?: import('./snapshot').ShapeChange[];
+  /** Set when the step took longer than the budget it declared. */
+  overBudget?: {budgetMs: number; actualMs: number};
+  /** Marks a state produced by a cleanup step rather than the journey proper. */
+  teardown?: boolean;
 }
 
 export interface ResolvedRequest {
@@ -188,6 +192,20 @@ export interface JourneyNode {
   label?: string;
   config: Record<string, unknown>;
   position: {x: number; y: number};
+  /**
+   * Runs after the journey finishes, whether it passed or failed.
+   *
+   * The failed run is precisely the one that leaves records behind — it created
+   * the account and then fell over before the step that deletes it — so cleanup
+   * that only happens on success cleans up exactly when there was nothing to
+   * clean.
+   */
+  teardown?: boolean;
+  /**
+   * How long this step is allowed to take. A breach is reported, not failed,
+   * unless the run is strict — one cold start should not turn a suite red.
+   */
+  budgetMs?: number;
 }
 
 export interface JourneyEdge {

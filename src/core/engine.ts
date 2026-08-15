@@ -22,6 +22,7 @@ import type {
   Produces,
   ResolvedRequest,
   RunContext,
+  RunStatus,
 } from './types';
 
 export interface Transport {
@@ -56,6 +57,8 @@ export interface RunOptions {
   baseline?: Record<string, Shape>;
   /** Treat a shape break as a step failure. Off by default. */
   strictSnapshot?: boolean;
+  /** Treat a blown timing budget as a step failure. Off by default. */
+  strictBudget?: boolean;
   /** Context values to start with — one row of a data-driven run. */
   seed?: Record<string, unknown>;
 }
@@ -64,6 +67,8 @@ export interface RunResult {
   context: RunContext;
   states: Record<string, NodeState>;
   passed: boolean;
+  /** Cleanup steps that failed — i.e. data this run could not take back. */
+  leaked: string[];
 }
 
 function newContext(
@@ -204,25 +209,26 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
     }
   }
 
-  let passed = true;
-
-  for (const node of ordered) {
-    if (signal?.aborted) break;
-    if (wanted && !wanted.has(node.id)) continue;
-
+  /**
+   * Run one node and record its state.
+   *
+   * Extracted so the main pass and the teardown pass execute steps identically —
+   * a cleanup step that behaved subtly differently from a normal one is a bug
+   * waiting to happen in the code nobody watches.
+   */
+  const runOne = async (node: JourneyNode): Promise<RunStatus> => {
     const def = lookup(node.type);
     const label = node.label ?? def?.label ?? node.type;
 
     if (!def) {
       states[node.id] = {status: 'failed', error: `Unknown node type "${node.type}".`};
       hooks?.onLog?.(`✗ ${label} — unknown node type`);
-      passed = false;
-      break;
+      return 'failed';
     }
 
     if (hooks?.beforeNode && (await hooks.beforeNode(node, ctx)) === false) {
       states[node.id] = {status: 'skipped'};
-      continue;
+      return 'skipped';
     }
 
     hooks?.onNodeStart?.(node.id);
@@ -232,15 +238,18 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
     try {
       if (def.control) {
         const result = await runControl(def, node, ctx);
-        const state: NodeState = result.ok
-          ? {status: 'passed', durationMs: Date.now() - started}
-          : {status: 'failed', error: result.error, durationMs: Date.now() - started};
+        const state: NodeState = {
+          ...(result.ok
+            ? {status: 'passed' as RunStatus}
+            : {status: 'failed' as RunStatus, error: result.error}),
+          durationMs: Date.now() - started,
+          ...(node.teardown ? {teardown: true} : {}),
+        };
         states[node.id] = state;
         hooks?.onLog?.(result.ok ? `✓ ${label}` : `✗ ${label} — ${result.error}`);
         hooks?.onNodeEnd?.(node.id, state);
-        if (!result.ok) { passed = false; break; }
-        hooks?.onContext?.(ctx);
-        continue;
+        if (result.ok) hooks?.onContext?.(ctx);
+        return state.status;
       }
 
       const request = buildRequest(def, node, ctx)!;
@@ -272,12 +281,25 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       const shapeChanges = shape && recorded ? diffShape(recorded, shape) : [];
       const shapeBreaks = shapeChanges.filter((c) => c.severity === 'error');
 
+      // A step can declare how long it is allowed to take. The response's own
+      // duration is used rather than the wall clock around it, so assertion and
+      // contract work is not billed to the API being measured.
+      const overBudget =
+        node.budgetMs && res.durationMs > node.budgetMs
+          ? {budgetMs: node.budgetMs, actualMs: res.durationMs}
+          : undefined;
+
       const drifted =
-        (opts.strictContract && contractBreaks.length) || (opts.strictSnapshot && shapeBreaks.length);
+        (opts.strictContract && contractBreaks.length) ||
+        (opts.strictSnapshot && shapeBreaks.length) ||
+        (opts.strictBudget && overBudget);
       const driftError = [
-        ...(opts.strictContract ? contractBreaks : []),
-        ...(opts.strictSnapshot ? shapeBreaks : []),
-      ].map((f) => f.message);
+        ...(opts.strictContract ? contractBreaks.map((f) => f.message) : []),
+        ...(opts.strictSnapshot ? shapeBreaks.map((f) => f.message) : []),
+        ...(opts.strictBudget && overBudget
+          ? [`took ${overBudget.actualMs}ms against a budget of ${overBudget.budgetMs}ms`]
+          : []),
+      ];
 
       const state: NodeState = {
         status: failed.length || drifted ? 'failed' : 'passed',
@@ -288,6 +310,8 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         ...(contract.length ? {contract} : {}),
         ...(shape ? {shape} : {}),
         ...(shapeChanges.length ? {shapeChanges} : {}),
+        ...(overBudget ? {overBudget} : {}),
+        ...(node.teardown ? {teardown: true} : {}),
         ...(failed.length
           ? {error: failed.map(describeFailure).join('; ')}
           : drifted
@@ -299,8 +323,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       if (state.status === 'failed') {
         hooks?.onLog?.(`✗ ${label} — ${state.error}`);
         hooks?.onNodeEnd?.(node.id, state);
-        passed = false;
-        break;
+        return 'failed';
       }
 
       extract(def.gives, res, ctx, hooks?.onLog);
@@ -309,27 +332,62 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       const drift = [
         contractBreaks.length ? summariseContract(contract) : '',
         shapeBreaks.length ? summariseShape(shapeChanges) : '',
+        overBudget ? `${overBudget.actualMs}ms over a ${overBudget.budgetMs}ms budget` : '',
       ].filter(Boolean);
       hooks?.onLog?.(
         `✓ ${label} · ${res.status} · ${res.durationMs}ms${drift.length ? ` · ⚠ ${drift.join(', ')}` : ''}`,
       );
       hooks?.onNodeEnd?.(node.id, state);
       hooks?.onContext?.(ctx);
+      return 'passed';
     } catch (err) {
       const state: NodeState = {
         status: 'failed',
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - started,
+        ...(node.teardown ? {teardown: true} : {}),
       };
       states[node.id] = state;
       hooks?.onLog?.(`✗ ${label} — ${state.error}`);
       hooks?.onNodeEnd?.(node.id, state);
+      return 'failed';
+    }
+  };
+
+  let passed = true;
+
+  for (const node of ordered) {
+    if (signal?.aborted) break;
+    if (node.teardown) continue;
+    if (wanted && !wanted.has(node.id)) continue;
+    if ((await runOne(node)) === 'failed') {
       passed = false;
       break;
     }
   }
 
-  return {context: ctx, states, passed};
+  // Teardown runs whether the journey passed or failed, and is not filtered by
+  // `startAt` — the half-finished run is the one that left records behind, and
+  // "clean up only when nothing went wrong" cleans up exactly when there was
+  // nothing to clean.
+  //
+  // A failing cleanup step does not stop the others: if deleting the order
+  // fails, the account it belongs to should still be attempted. Best effort is
+  // the whole contract here.
+  const teardown = ordered.filter((node) => node.teardown);
+  const leaked: string[] = [];
+
+  if (teardown.length && !signal?.aborted) {
+    hooks?.onLog?.('— cleaning up');
+    for (const node of teardown) {
+      if (signal?.aborted) break;
+      if ((await runOne(node)) === 'failed') {
+        leaked.push(node.label ?? lookup(node.type)?.label ?? node.type);
+      }
+    }
+  }
+
+  return {context: ctx, states, passed, leaked};
 }
 
 export interface CaseRun {

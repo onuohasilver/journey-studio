@@ -25,6 +25,12 @@ export interface StepReport {
   contract: ContractFinding[];
   /** How the response shape moved since it was recorded. */
   shapeChanges: ShapeChange[];
+  /** The step's declared time budget, if it has one. */
+  budgetMs?: number;
+  /** Set when this run exceeded that budget. */
+  overBudget?: {budgetMs: number; actualMs: number};
+  /** True for a cleanup step, which runs after the journey either way. */
+  teardown?: boolean;
   /** Only for a failed step: what was sent, so the failure is reproducible. */
   request?: {method: string; url: string};
   /** Only when explicitly asked for — bodies routinely hold PII and tokens. */
@@ -42,6 +48,8 @@ export interface JourneyReport {
   created: {key: string; value: string}[];
   contractBreaks: number;
   shapeBreaks: number;
+  /** Cleanup steps that failed — data this run could not take back. */
+  leaked: string[];
 }
 
 export interface QaReport {
@@ -57,10 +65,13 @@ export interface QaReport {
     steps: number;
     contractBreaks: number;
     shapeBreaks: number;
+    leaked: number;
   };
   journeys: JourneyReport[];
   /** Steps whose outcome varied across repeats. Populated by `findFlakes`. */
   flaky?: FlakyStep[];
+  /** Steps whose p95 blew their budget. Populated by `findSlowSteps`. */
+  slow?: StepTiming[];
 }
 
 export interface FlakyStep {
@@ -68,6 +79,16 @@ export interface FlakyStep {
   step: string;
   passed: number;
   of: number;
+}
+
+export interface StepTiming {
+  journey: string;
+  step: string;
+  samples: number;
+  p50: number;
+  p95: number;
+  max: number;
+  budgetMs: number;
 }
 
 export interface ReportOptions {
@@ -118,6 +139,9 @@ export function buildJourneyReport(
         .map((a) => a.assertion.label ?? a.assertion.path ?? a.assertion.op),
       contract,
       shapeChanges,
+      ...(node.budgetMs ? {budgetMs: node.budgetMs} : {}),
+      ...(state.overBudget ? {overBudget: state.overBudget} : {}),
+      ...(state.teardown ? {teardown: true} : {}),
       ...(state.status === 'failed' && state.sent
         ? {request: {method: state.sent.method, url: state.sent.url}}
         : {}),
@@ -129,23 +153,35 @@ export function buildJourneyReport(
 
   // What the run left behind on a shared environment. The single most useful
   // line in a nightly report that ran against staging.
-  const created = ordered.flatMap((node) => {
+  //
+  // Keyed rather than listed: two steps commonly write the same key — a create
+  // gives `petId` and the read-back gives it again — and one record should be
+  // reported once, at the value it ended up with.
+  const createdByKey = new Map<string, string>();
+  for (const node of ordered) {
     const def = lookup(node.type);
-    if (!def || states[node.id]?.status !== 'passed') return [];
-    return def.gives
-      .filter((give) => context?.vars[give.key] !== undefined)
-      .map((give) => ({key: give.key, value: short(context!.vars[give.key])}));
-  });
+    if (!def || states[node.id]?.status !== 'passed') continue;
+    for (const give of def.gives) {
+      if (context?.vars[give.key] === undefined) continue;
+      createdByKey.set(give.key, short(context.vars[give.key]));
+    }
+  }
+  const created = [...createdByKey].map(([key, value]) => ({key, value}));
 
   return {
     name: journey.name,
     ...(options.caseName ? {case: options.caseName} : {}),
-    status: steps.some((s) => s.status === 'failed') ? 'failed' : 'passed',
+    // A cleanup step that failed is a hygiene problem, not a product one: the
+    // API under test may have behaved perfectly. It gets its own line rather
+    // than turning the journey red, on the same principle as drift — a verdict
+    // people learn to distrust is worse than one they read.
+    status: steps.some((s) => s.status === 'failed' && !s.teardown) ? 'failed' : 'passed',
     durationMs,
     steps,
     created,
     contractBreaks,
     shapeBreaks,
+    leaked: steps.filter((s) => s.teardown && s.status === 'failed').map((s) => s.label),
   };
 }
 
@@ -173,6 +209,7 @@ export function buildReport(
       steps: journeys.reduce((n, j) => n + j.steps.length, 0),
       contractBreaks: journeys.reduce((n, j) => n + j.contractBreaks, 0),
       shapeBreaks: journeys.reduce((n, j) => n + j.shapeBreaks, 0),
+      leaked: journeys.reduce((n, j) => n + j.leaked.length, 0),
     },
     journeys,
   };
@@ -182,12 +219,65 @@ export function buildReport(
 export function summariseDrift(totals: QaReport['totals']): string {
   const parts: string[] = [];
   if (totals.contractBreaks) {
-    parts.push(`${totals.contractBreaks} response${totals.contractBreaks === 1 ? '' : 's'} no longer match the spec`);
+    parts.push(
+      totals.contractBreaks === 1
+        ? '1 response no longer matches the spec'
+        : `${totals.contractBreaks} responses no longer match the spec`,
+    );
   }
   if (totals.shapeBreaks) {
     parts.push(`${totals.shapeBreaks} changed shape since it was recorded`);
   }
   return parts.join('; ');
+}
+
+/**
+ * Budgets judged across every run there was, rather than one sample.
+ *
+ * A single slow response is not an SLO breach — it is a cold start, a noisy
+ * neighbour, or a laptop that went to sleep. Failing on it produces exactly the
+ * flakiness this tool exists to name, so the verdict is taken at p95: with one
+ * run that is the run, and with twelve cases or five repeats it is the number
+ * anybody would actually defend in a review.
+ */
+export function findSlowSteps(attempts: QaReport[]): StepTiming[] {
+  const samples = new Map<string, {journey: string; step: string; budgetMs: number; times: number[]}>();
+
+  for (const attempt of attempts) {
+    for (const journey of attempt.journeys) {
+      for (const step of journey.steps) {
+        if (!step.budgetMs || step.durationMs === undefined) continue;
+        // Keyed on the journey, not the case: twelve rows of one journey are
+        // twelve samples of the same step, which is the point.
+        const key = `${journey.name}\u0000${step.id}`;
+        const row = samples.get(key) ?? {journey: journey.name, step: step.label, budgetMs: step.budgetMs, times: []};
+        row.times.push(step.durationMs);
+        samples.set(key, row);
+      }
+    }
+  }
+
+  return [...samples.values()]
+    .map((row) => {
+      const sorted = [...row.times].sort((a, b) => a - b);
+      return {
+        journey: row.journey,
+        step: row.step,
+        samples: sorted.length,
+        p50: percentile(sorted, 0.5),
+        p95: percentile(sorted, 0.95),
+        max: sorted[sorted.length - 1],
+        budgetMs: row.budgetMs,
+      };
+    })
+    .filter((row) => row.p95 > row.budgetMs)
+    .sort((a, b) => b.p95 / b.budgetMs - a.p95 / a.budgetMs);
+}
+
+/** Nearest-rank, so the answer is always a number that actually occurred. */
+function percentile(sorted: number[], p: number): number {
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)];
 }
 
 /**
@@ -241,17 +331,33 @@ export function summariseText(report: QaReport): string {
       const drift = [
         step.contract.length ? summariseContract(step.contract) : '',
         step.shapeChanges.some((c) => c.severity !== 'info') ? summariseShape(step.shapeChanges) : '',
+        step.overBudget ? `${step.overBudget.actualMs}ms over a ${step.overBudget.budgetMs}ms budget` : '',
       ]
         .filter(Boolean)
         .join(', ');
       lines.push(
-        `${mark} ${step.label}${step.httpStatus ? ` · ${step.httpStatus}` : ''}${timing}${drift ? ` — ${drift}` : ''}`,
+        `${mark} ${step.teardown ? '⌫ ' : ''}${step.label}${step.httpStatus ? ` · ${step.httpStatus}` : ''}` +
+          `${timing}${drift ? ` — ${drift}` : ''}`,
       );
       if (step.error) lines.push(`      ${step.error}`);
       if (step.request) lines.push(`      sent: ${step.request.method} ${step.request.url}`);
     }
     if (journey.created.length) {
       lines.push(`  created: ${journey.created.map((c) => `${c.key}=${c.value}`).join(', ')}`);
+    }
+    if (journey.leaked.length) {
+      lines.push(`  LEFT BEHIND: ${journey.leaked.join(', ')} could not clean up`);
+    }
+  }
+
+  if (report.slow?.length) {
+    lines.push('');
+    lines.push('Over budget:');
+    for (const slow of report.slow) {
+      lines.push(
+        `  ⏱ ${slow.journey} · ${slow.step} — p95 ${slow.p95}ms against ${slow.budgetMs}ms ` +
+          `(p50 ${slow.p50}ms, max ${slow.max}ms, ${slow.samples} run${slow.samples === 1 ? '' : 's'})`,
+      );
     }
   }
 

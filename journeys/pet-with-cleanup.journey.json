@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "name": "Pet with cleanup",
+  "description": "Creates a pet, reads it under a time budget, then deletes it as a clean-up step.",
+  "savedAt": "2026-08-15T17:15:30.586Z",
+  "env": "demo",
+  "journey": {
+    "name": "Pet with cleanup",
+    "nodes": [
+      {
+        "id": "s1",
+        "type": "openapi.swagger-petstore-openapi-3-0.addPet",
+        "label": "Create a pet",
+        "config": {},
+        "position": {
+          "x": 120,
+          "y": 170
+        }
+      },
+      {
+        "id": "s2",
+        "type": "openapi.swagger-petstore-openapi-3-0.getPetById",
+        "label": "Read it back",
+        "config": {},
+        "position": {
+          "x": 420,
+          "y": 170
+        },
+        "budgetMs": 300
+      },
+      {
+        "id": "s3",
+        "type": "openapi.swagger-petstore-openapi-3-0.deletePet",
+        "label": "Delete the pet",
+        "config": {},
+        "position": {
+          "x": 720,
+          "y": 170
+        },
+        "teardown": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "s1",
+        "target": "s2"
+      },
+      {
+        "id": "e2",
+        "source": "s2",
+        "target": "s3"
+      }
+    ]
+  },
+  "defs": [
+    {
+      "type": "openapi.swagger-petstore-openapi-3-0.addPet",
+      "label": "Create a pet",
+      "group": "pet",
+      "summary": "Creates the record this journey then reads and cleans up.",
+      "fields": [
+        {
+          "key": "name",
+          "label": "name",
+          "kind": "text",
+          "required": true
+        }
+      ],
+      "defaults": {
+        "name": "journey-studio-{{$uuid}}"
+      },
+      "request": {
+        "method": "POST",
+        "path": "/pet",
+        "body": {
+          "id": 987654321,
+          "name": "{{fields.name}}",
+          "photoUrls": [],
+          "status": "available"
+        }
+      },
+      "needs": [],
+      "gives": [
+        {
+          "key": "petId",
+          "from": "body.id"
+        }
+      ],
+      "assertions": [
+        {
+          "op": "status",
+          "expected": 200
+        }
+      ],
+      "destructive": true
+    },
+    {
+      "type": "openapi.swagger-petstore-openapi-3-0.getPetById",
+      "label": "Find pet by ID.",
+      "summary": "Returns a single pet.",
+      "group": "pet",
+      "fields": [
+        {
+          "key": "petId",
+          "label": "petId",
+          "kind": "number",
+          "help": "ID of pet to return",
+          "required": true
+        }
+      ],
+      "defaults": {
+        "petId": "{{vars.petId}}"
+      },
+      "request": {
+        "method": "GET",
+        "path": "/pet/{{fields.petId}}"
+      },
+      "needs": [
+        "petId"
+      ],
+      "gives": [
+        {
+          "key": "petId",
+          "from": "body.id"
+        }
+      ],
+      "responseSchema": {
+        "required": [
+          "name",
+          "photoUrls"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 10
+          },
+          "name": {
+            "type": "string",
+            "example": "doggie"
+          },
+          "category": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "example": 1
+              },
+              "name": {
+                "type": "string",
+                "example": "Dogs"
+              }
+            },
+            "xml": {
+              "name": "category"
+            }
+          },
+          "photoUrls": {
+            "type": "array",
+            "xml": {
+              "wrapped": true
+            },
+            "items": {
+              "type": "string",
+              "xml": {
+                "name": "photoUrl"
+              }
+            }
+          },
+          "tags": {
+            "type": "array",
+            "xml": {
+              "wrapped": true
+            },
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "xml": {
+                "name": "tag"
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "pet status in the store",
+            "enum": [
+              "available",
+              "pending",
+              "sold"
+            ]
+          }
+        },
+        "xml": {
+          "name": "pet"
+        }
+      },
+      "assertions": [
+        {
+          "op": "status",
+          "expected": 200
+        }
+      ],
+      "destructive": false
+    },
+    {
+      "type": "openapi.swagger-petstore-openapi-3-0.deletePet",
+      "label": "Delete the pet",
+      "group": "pet",
+      "fields": [
+        {
+          "key": "petId",
+          "label": "petId",
+          "kind": "text",
+          "required": true
+        }
+      ],
+      "defaults": {
+        "petId": "{{vars.petId}}"
+      },
+      "request": {
+        "method": "DELETE",
+        "path": "/pet/{{fields.petId}}"
+      },
+      "needs": [
+        "petId"
+      ],
+      "gives": [],
+      "assertions": [
+        {
+          "op": "status",
+          "expected": 200
+        }
+      ],
+      "destructive": true
+    }
+  ],
+  "sources": null
+}

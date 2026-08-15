@@ -115,6 +115,30 @@ export function formatReport(report: QaReport, meta: {title?: string; link?: str
     );
   }
 
+  // Data left on a shared environment is the line an on-call person needs even
+  // when everything else was green.
+  if (totals.leaked) {
+    const names = report.journeys.flatMap((j) => j.leaked);
+    blocks.push(
+      section(
+        `:broom: *${totals.leaked} cleanup step${totals.leaked === 1 ? '' : 's'} failed* — ` +
+          `data was left on ${escape(report.env)}: ${names.slice(0, 6).map(escape).join(', ')}` +
+          `${names.length > 6 ? `, +${names.length - 6} more` : ''}`,
+      ),
+    );
+  }
+
+  if (report.slow?.length) {
+    blocks.push(
+      section(
+        `:stopwatch: *Over budget:* ${report.slow
+          .slice(0, 6)
+          .map((s) => `${escape(s.step)} p95 ${s.p95}ms / ${s.budgetMs}ms`)
+          .join(', ')}`,
+      ),
+    );
+  }
+
   if (report.flaky?.length) {
     blocks.push(
       section(

@@ -22,6 +22,8 @@ interface CardData extends Record<string, unknown> {
   status: NodeState['status'];
   method?: string;
   control?: boolean;
+  teardown?: boolean;
+  budgetMs?: number;
 }
 
 /** The method tile is the fastest read on a canvas: colour tells you the verb. */
@@ -36,12 +38,16 @@ function JourneyCard({data, selected}: NodeProps) {
   const d = data as CardData;
   const status = d.status ?? 'idle';
   return (
-    <div className={`jnode ${status} ${selected ? 'selected' : ''}`}>
+    <div className={`jnode ${status} ${selected ? 'selected' : ''} ${d.teardown ? 'teardown' : ''}`}>
       <Handle type="target" position={Position.Left} />
       <span className={tileClass(d.method, d.control)}>{d.control ? '◆' : (d.method ?? 'GET').slice(0, 3)}</span>
       <span className="body">
         <span className="nm">{d.label}</span>
-        <span className="sub">{d.call}</span>
+        <span className="sub">
+          {d.teardown ? 'clean-up · ' : ''}
+          {d.call}
+          {d.budgetMs ? ` · ≤${d.budgetMs}ms` : ''}
+        </span>
       </span>
       <span className="dot" />
       <Handle type="source" position={Position.Right} />
@@ -75,6 +81,8 @@ function Flow() {
             method: def?.request?.method,
             control: Boolean(def?.control),
             status: states[n.id]?.status ?? 'idle',
+            teardown: n.teardown,
+            budgetMs: n.budgetMs,
           } satisfies CardData,
         };
       }),
