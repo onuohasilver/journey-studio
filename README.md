@@ -96,6 +96,16 @@ in the node process — the browser never sees it.
   responses they already fetched. A planner that can only replace the canvas is one you stop using
   after the second prompt.
 - **Explain** turns the canvas into plain English: what it does, what it creates, what to watch for.
+- **What should I test next?** An imported document declares every operation the API has, and the
+  saved journeys declare which ones they touch — so for once the denominator is known. The counting
+  is done in code and deliberately not by the model: a coverage figure that might be hallucinated is
+  worse than none, because people act on it. The model is asked only for the judgement — which gaps
+  matter, and what to write — and every operation it names must appear in the gaps it was given.
+- **Build a reproduction from a bug report.** A report is mostly not reproduction steps; it is a
+  narrative with a severity, a stack trace and three sentences of context. This pulls out the calls it
+  implies and lists **separately what it had to assume**, because a reproduction that quietly invents
+  the input reproduces something else. What it cannot get from the report becomes a question to ask
+  the reporter.
 
 The model is grounded, not trusted. Every node type, setting and step reference that comes back is
 re-checked against the live registry before it reaches the canvas — anything that fails is reported,
@@ -621,7 +631,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 396 tests, no network
+npm test        # 408 tests, no network
 npm run typecheck
 npm run build
 ```

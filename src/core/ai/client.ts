@@ -81,6 +81,39 @@ export interface AssertionSuggestions {
  * routinely hold tokens and personal data, so this is a deliberate action with a
  * warning next to it rather than something that happens on every run.
  */
+export interface CoverageSuggestion {
+  journey: string;
+  why: string;
+  types: string[];
+  risk?: 'high' | 'medium' | 'low';
+}
+
+export interface CoverageAdvice {
+  headline?: string;
+  suggestions: CoverageSuggestion[];
+}
+
+/** Rank the gaps. The counting is done in `coverageOf`, never here. */
+export const requestCoverageAdvice = (body: {
+  gaps: string;
+  covered: string;
+  nodeIndex: string;
+  environments: string;
+}) => post<CoverageAdvice>('/api/ai/coverage', body);
+
+export interface Reproduction {
+  summary: string;
+  steps: {type: string; label?: string; why: string; config?: {key: string; value: string}[]}[];
+  /** What it decided because the report did not say. */
+  assumptions: string[];
+  /** What it would need from the reporter to make this exact. */
+  missing?: string[];
+  expected?: string;
+}
+
+export const requestReproduction = (body: {report: string; nodeIndex: string; environments: string}) =>
+  post<Reproduction>('/api/ai/reproduce', body);
+
 export const requestAssertions = (body: {
   step: string;
   response: unknown;

@@ -138,6 +138,8 @@ export interface JourneySummary {
   uses: string[];
   /** Opts out of running alongside anything else. */
   serial: boolean;
+  /** Node types this journey uses, for working out what the suite covers. */
+  types: string[];
 }
 
 export async function listJourneys(root: string): Promise<JourneySummary[]> {
@@ -163,11 +165,12 @@ export async function listJourneys(root: string): Promise<JourneySummary[]> {
         tags: saved.journey?.tags ?? [],
         uses: saved.journey?.uses ?? [],
         serial: Boolean(saved.journey?.serial),
+        types: [...new Set((saved.journey?.nodes ?? []).map((n) => n.type))],
       });
     } catch {
       // A single unreadable file should not hide the rest of the suite.
       out.push({
-        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [], uses: [], serial: false,
+        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [], uses: [], serial: false, types: [],
         description: 'could not be read',
       });
     }

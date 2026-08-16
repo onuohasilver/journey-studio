@@ -4,6 +4,9 @@ import {summariseContract} from '../core/contract';
 import {summariseShape} from '../core/snapshot';
 import {summariseDrift} from '../core/report';
 import {describeTrend} from '../core/history';
+import {coverageOf, summariseCoverage} from '../core/coverage';
+import {allDefs} from '../core/registry';
+import type {CoverageAdvice} from '../core/ai/client';
 import {casesFromCsv, casesToCsv} from '../core/csv';
 import {useStudio} from '../state/store';
 
@@ -499,6 +502,78 @@ export function CasesPanel() {
   );
 }
 
+/**
+ * What the suite does not touch.
+ *
+ * The counting is done in `coverageOf`, never by the model — a coverage figure
+ * that might be hallucinated is worse than none, because people act on it. The
+ * model is asked only for the part that is judgement: which gaps matter.
+ */
+function CoverageSection() {
+  const saved = useStudio((s) => s.saved);
+  const adviseCoverage = useStudio((s) => s.adviseCoverage);
+  const [advice, setAdvice] = useState<(CoverageAdvice & {error?: string}) | null>(null);
+  const [asking, setAsking] = useState(false);
+
+  const coverage = coverageOf(allDefs(), saved.map((j) => ({name: j.name, types: j.types})));
+  const total = coverage.covered.length + coverage.uncovered.length;
+  if (!total) return null;
+
+  return (
+    <>
+      <span className="caps">Coverage</span>
+      <div className={`note ${coverage.percent >= 80 ? 'info' : 'warn'}`}>
+        <strong>{summariseCoverage(coverage)}</strong>
+        {coverage.unknown.length ? (
+          <div style={{marginTop: 6}}>
+            {coverage.unknown.length} step type(s) come from a document not imported here, so their
+            coverage is not counted.
+          </div>
+        ) : null}
+      </div>
+
+      {coverage.byGroup.slice(0, 4).map((group) => (
+        <div className="bar" key={group.group}>
+          <span className="nm">{group.group}</span>
+          <span className="track">
+            <i style={{width: `${Math.round((group.covered / group.total) * 100)}%`}} />
+          </span>
+          <span className="num">
+            {group.covered}/{group.total}
+          </span>
+        </div>
+      ))}
+
+      <button
+        className="btn"
+        disabled={asking || !coverage.uncovered.length}
+        onClick={async () => {
+          setAsking(true);
+          setAdvice(await adviseCoverage());
+          setAsking(false);
+        }}
+      >
+        {asking ? 'Looking at the gaps…' : '✳ What should I test next?'}
+      </button>
+
+      {advice?.error && <div className="note bad">{advice.error}</div>}
+      {advice?.headline && <p className="help">{advice.headline}</p>}
+      {advice?.suggestions.map((s, i) => (
+        <div className="pack" key={i}>
+          <div className="nm">
+            {s.journey}
+            {s.risk ? <span className={`risk ${s.risk}`}>{s.risk}</span> : null}
+          </div>
+          <div className="sub">{s.why}</div>
+          <div className="sub" style={{marginTop: 6, fontFamily: 'var(--mono)', fontSize: 10.5}}>
+            {s.types.join(' → ')}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Journeys saved to disk — the suite the CLI runs in CI. */
 export function SavedPanel() {
   const saved = useStudio((s) => s.saved);
@@ -580,6 +655,8 @@ export function SavedPanel() {
           </div>
         </div>
       ))}
+
+      <CoverageSection />
 
       <span className="caps">In CI</span>
       <pre style={{margin: 0, background: 'var(--surface-0)', border: '1px solid var(--line)', borderRadius: 8, padding: 10, fontSize: 11, fontFamily: 'var(--mono)', overflowX: 'auto'}}>

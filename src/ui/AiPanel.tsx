@@ -6,7 +6,7 @@
 // already fetched — exactly where they were.
 
 import {useEffect, useState} from 'react';
-import {aiStatus, type AiStatus} from '../core/ai/client';
+import {aiStatus, type AiStatus, type Reproduction} from '../core/ai/client';
 import {useStudio} from '../state/store';
 import type {AiTurn} from '../state/store';
 
@@ -86,6 +86,10 @@ export function AiPanel() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [startingOver, setStartingOver] = useState(false);
+  const [bugReport, setBugReport] = useState('');
+  const [reproducing, setReproducing] = useState(false);
+  const [reproduction, setReproduction] = useState<(Reproduction & {error?: string}) | undefined>();
+  const reproduce = useStudio((s) => s.reproduce);
 
   useEffect(() => {
     void aiStatus().then(setStatus);
@@ -150,6 +154,61 @@ export function AiPanel() {
           </>
         )}
       </div>
+
+      <span className="caps">From a bug report</span>
+      <div className="field">
+        <textarea
+          value={bugReport}
+          rows={4}
+          onChange={(e) => setBugReport(e.target.value)}
+          placeholder={'Paste a ticket or a Slack message…\n\n"Refunds over £500 return 200 but the balance never moves. Seen on staging by two customers this morning."'}
+          aria-label="Paste a bug report"
+        />
+        <span className="help">
+          A report is mostly not reproduction steps. This pulls out the calls it implies, and lists
+          separately what it had to assume — a reproduction that quietly invents the input reproduces
+          something else.
+        </span>
+      </div>
+      <button
+        className="btn"
+        disabled={!bugReport.trim() || reproducing || !status?.configured}
+        onClick={async () => {
+          setReproducing(true);
+          setReproduction(await reproduce(bugReport));
+          setReproducing(false);
+        }}
+      >
+        {reproducing ? 'Reading the report…' : '✳ Build a reproduction'}
+      </button>
+
+      {reproduction?.error && <div className="note bad">{reproduction.error}</div>}
+      {reproduction && !reproduction.error && (
+        <>
+          <div className="note info">{reproduction.summary}</div>
+          {reproduction.expected && (
+            <p className="help">
+              <strong>Should happen once fixed:</strong> {reproduction.expected}
+            </p>
+          )}
+          {reproduction.assumptions.length > 0 && (
+            <>
+              <span className="caps">Assumed, because the report did not say</span>
+              {reproduction.assumptions.map((a, i) => (
+                <div key={i} className="note warn">{a}</div>
+              ))}
+            </>
+          )}
+          {reproduction.missing?.length ? (
+            <>
+              <span className="caps">Ask the reporter</span>
+              {reproduction.missing.map((m, i) => (
+                <div key={i} className="note">{m}</div>
+              ))}
+            </>
+          ) : null}
+        </>
+      )}
 
       {/* Editing is the default once anything is on the canvas; a rebuild has to
           be asked for, because it discards every id, position and result. */}

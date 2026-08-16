@@ -14,7 +14,18 @@ import {importDocument} from '../core/import';
 import {applyOps, buildChain, type AppliedChange} from '../core/ai/apply';
 import {buildCanvasIndex, buildJourneyDigest, buildNodeIndex} from '../core/ai/grounding';
 import {validateEdit, validatePlan} from '../core/ai/validate';
-import {requestAssertions, requestExplanation, requestPlan, requestRevision, type AssertionSuggestions, type Explanation} from '../core/ai/client';
+import {
+  requestAssertions,
+  requestCoverageAdvice,
+  requestExplanation,
+  requestPlan,
+  requestReproduction,
+  requestRevision,
+  type AssertionSuggestions,
+  type CoverageAdvice,
+  type Explanation,
+  type Reproduction,
+} from '../core/ai/client';
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
@@ -64,6 +75,7 @@ export interface SavedSummary {
   tags: string[];
   uses: string[];
   serial: boolean;
+  types: string[];
 }
 
 interface StudioState {
@@ -160,6 +172,8 @@ interface StudioState {
   revise(instruction: string, thenRun: boolean): Promise<void>;
   explain(): Promise<void>;
   suggestAssertions(id: string): Promise<AssertionSuggestions & {error?: string}>;
+  adviseCoverage(): Promise<CoverageAdvice & {error?: string}>;
+  reproduce(report: string): Promise<(Reproduction & {error?: string}) | undefined>;
   resetConversation(): void;
 }
 
@@ -892,6 +906,53 @@ export const useStudio = create<StudioState>((set, get) => {
       nodeIndex: buildNodeIndex(allDefs()),
       environments: config.environments.map((e) => `${e.name} | ${e.baseUrl}`).join('\n'),
     });
+  },
+
+  async adviseCoverage() {
+    const {saved, config} = get();
+    const {coverageOf, gapsForRanking} = await import('../core/coverage');
+    const coverage = coverageOf(
+      allDefs(),
+      saved.map((s) => ({name: s.name, types: s.types})),
+    );
+    if (!coverage.uncovered.length) {
+      return {suggestions: [], error: 'Every loaded operation is already touched by a journey.'};
+    }
+
+    return requestCoverageAdvice({
+      gaps: gapsForRanking(coverage),
+      covered: coverage.covered.map((r) => `${r.type} | used by ${r.usedBy.join(', ')}`).join('\n'),
+      nodeIndex: buildNodeIndex(allDefs()),
+      environments: config.environments.map((e) => `${e.name} | ${e.baseUrl}`).join('\n'),
+    });
+  },
+
+  async reproduce(report) {
+    const {config} = get();
+    const result = await requestReproduction({
+      report,
+      nodeIndex: buildNodeIndex(allDefs()),
+      environments: config.environments.map((e) => `${e.name} | ${e.baseUrl}`).join('\n'),
+    });
+    if ((result as {error?: string}).error || !result.steps?.length) return result;
+
+    // Through the same validation and apply path as a built journey: the model
+    // is grounded, not trusted, and a reproduction is no more trustworthy than
+    // a plan just because it came from a ticket.
+    const checked = validatePlan({summary: result.summary, steps: result.steps}, registryLookup);
+    const built = buildChain(checked.steps, registryLookup);
+    mutate('build a reproduction', () => ({...built, name: result.summary.slice(0, 60) || 'Reproduction'}));
+
+    set({
+      states: {},
+      report: null,
+      logs: [
+        `built a reproduction from the report`,
+        ...result.assumptions.map((a) => `  ? assumed ${a}`),
+        ...checked.problems.map((p) => `  ! ${p}`),
+      ],
+    });
+    return {...result, ...(checked.problems.length ? {error: checked.problems.join('; ')} : {})};
   },
 
     resetConversation: () => set({aiTurns: []}),

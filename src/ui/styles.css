@@ -419,3 +419,18 @@ kbd {
   font-size: 11px;
   color: var(--danger);
 }
+
+/* A coverage bar per group: the eye finds the short one without reading. */
+.bar { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; align-items: center; font-size: 11.5px; }
+.bar .nm { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .track { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.bar .track i { display: block; height: 100%; background: var(--brand); }
+.bar .num { font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+
+.risk {
+  margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  background: var(--line); color: var(--muted);
+}
+.risk.high { background: var(--danger-tint); color: var(--danger-strong); }
+.risk.medium { background: var(--warn-tint); color: var(--warn); }

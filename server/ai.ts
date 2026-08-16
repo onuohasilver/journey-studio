@@ -210,6 +210,78 @@ What makes a good assertion here:
 
 List anything you deliberately left alone in "skipped", with the reason.`;
 
+const COVERAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestions'],
+  properties: {
+    headline: {type: 'string', description: 'one line on the shape of the gap'},
+    suggestions: {
+      type: 'array',
+      maxItems: 5,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['journey', 'why', 'types'],
+        properties: {
+          journey: {type: 'string', description: 'what to call it, e.g. "Refund a settled order"'},
+          why: {type: 'string', description: 'the risk it covers, in one line'},
+          types: {type: 'array', items: {type: 'string'}, description: 'node types it would use, in order'},
+          risk: {enum: ['high', 'medium', 'low']},
+        },
+      },
+    },
+  },
+} as const;
+
+const COVERAGE_TASK = `Your task now: given the operations no journey touches, say which gaps matter and what to write next.
+
+What makes this useful rather than a restatement of the list:
+- Rank by consequence, not by count. An untested endpoint that moves money, deletes records or changes permissions outranks twenty untested reads.
+- Group into journeys, not endpoints. "Refund a settled order" is a thing somebody can go and write; "POST /refunds is untested" is the list they already have.
+- Every type you name must appear in the gaps given to you. Do not invent operations, and do not propose a journey whose steps are not all available.
+- Say what the risk actually is in one line — "a refund that succeeds twice would double-pay" beats "important endpoint".
+- Prefer chains that reuse what the covered journeys already produce; a journey that needs no new setup is one somebody will actually write.
+
+Five suggestions at most. If the gaps are all low-risk reads, say so plainly rather than manufacturing urgency.`;
+
+const REPRODUCE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'steps', 'assumptions'],
+  properties: {
+    summary: {type: 'string', description: 'what the report says is broken, in one line'},
+    steps: PLAN_SCHEMA.properties.steps,
+    assumptions: {
+      type: 'array',
+      items: {type: 'string'},
+      description: 'what you had to decide because the report did not say',
+    },
+    missing: {
+      type: 'array',
+      items: {type: 'string'},
+      description: 'what you would need from the reporter to make this exact',
+    },
+    expected: {type: 'string', description: 'what should happen if the bug is fixed'},
+  },
+} as const;
+
+const REPRODUCE_TASK = `Your task now: turn a bug report into a journey that reproduces it.
+
+A bug report is mostly not reproduction steps. It is a narrative with a severity, someone's
+frustration, a stack trace, a customer id, and three sentences of context. Pull out the sequence of
+API calls implied by it and leave the rest.
+
+Rules:
+- Build only from the node types listed above. If the report needs a call the loaded documents do not
+  have, say so in "missing" rather than inventing a step.
+- Separate what the report *stated* from what you *decided*. Anything you chose — an amount, a
+  currency, which account, the order of two steps — goes in "assumptions". A reproduction that
+  quietly invents the input is one that reproduces something else.
+- Put the failing call last, so the journey reads as "set this up, then do the thing that breaks".
+- Add the assertion that would fail *now* and pass once it is fixed, and describe that in "expected".
+- If the report is too vague to reproduce at all, return no steps and put the questions in "missing".`;
+
 const EXPLAIN_TASK =
   'Your task now: explain the journey below in plain English, for someone who has never seen this API. Use the refs given.';
 
@@ -368,6 +440,40 @@ export function createAiRouter(): Router {
         ].join('\n'),
         schema: ASSERT_SCHEMA,
         cutoff: 'The suggestions were cut off. Try a step with a smaller response.',
+      }),
+    );
+  });
+
+  router.post('/coverage', async (req: Request, res: Response) => {
+    const {gaps, covered, nodeIndex, environments} = req.body ?? {};
+    if (!gaps?.trim()) {
+      res.status(400).json({error: 'Nothing uncovered — import a document, or the suite already touches everything.'});
+      return;
+    }
+    res.json(
+      await callModel({
+        grounding: grounding({nodeIndex: nodeIndex ?? '', environments: environments ?? ''}),
+        task: COVERAGE_TASK,
+        user: [`ALREADY COVERED\n${covered || '(nothing yet)'}`, `\nNOT COVERED\n${gaps}`].join('\n'),
+        schema: COVERAGE_SCHEMA,
+        cutoff: 'The suggestions were cut off. Import a smaller document, or cover some of it first.',
+      }),
+    );
+  });
+
+  router.post('/reproduce', async (req: Request, res: Response) => {
+    const {report, nodeIndex, environments} = req.body ?? {};
+    if (!report?.trim()) {
+      res.status(400).json({error: 'Paste the bug report first.'});
+      return;
+    }
+    res.json(
+      await callModel({
+        grounding: grounding({nodeIndex: nodeIndex ?? '', environments: environments ?? ''}),
+        task: REPRODUCE_TASK,
+        user: `BUG REPORT\n${String(report).slice(0, 12000)}`,
+        schema: REPRODUCE_SCHEMA,
+        cutoff: 'The reproduction was cut off. Try a shorter report.',
       }),
     );
   });
