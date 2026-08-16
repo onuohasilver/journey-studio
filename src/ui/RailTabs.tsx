@@ -70,6 +70,14 @@ const ReportIcon: Icon = () => (
   </svg>
 );
 
+const FilesIcon: Icon = () => (
+  <svg viewBox="0 0 20 20" width="17" height="17" {...stroke}>
+    <rect x="2.5" y="3.5" width="15" height="13" rx="2" />
+    <circle cx="7" cy="7.5" r="1.4" />
+    <path d="M2.5 13l4-3.5 3.5 3 3-2.5 4 3.5" />
+  </svg>
+);
+
 const DocsIcon: Icon = () => (
   <svg viewBox="0 0 20 20" width="17" height="17" {...stroke}>
     <path d="M3.5 4.5A1.5 1.5 0 0 1 5 3h4v14H5a1.5 1.5 0 0 1-1.5-1.5Z" />
@@ -94,6 +102,7 @@ const GROUPS: Tab[][] = [
   [
     {rail: 'data', label: 'Cases', icon: CasesIcon, title: 'Rows of inputs to run the journey against'},
     {rail: 'saved', label: 'Journeys', icon: JourneysIcon, title: 'Journeys saved to disk'},
+    {rail: 'gallery', label: 'Files', icon: FilesIcon, title: 'Images and documents a step can upload'},
     {rail: 'packs', label: 'Docs', icon: DocsIcon, title: 'Imported documents and the nodes they gave'},
   ],
   [

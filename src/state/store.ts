@@ -29,6 +29,7 @@ import {
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
+import type {Fixture} from '../core/fixtures';
 import {trendsFrom, type HistoryFile, type StepTrend} from '../core/history';
 import type {HookMatch, HookMock, InboxSource, ReceivedHook} from '../core/inbox';
 import {fileNameFor, packJourney, readSaved, type SavedJourney} from '../core/persist';
@@ -62,7 +63,7 @@ export interface AiTurn {
   problems: string[];
 }
 
-export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved' | 'data' | 'inbox';
+export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved' | 'data' | 'inbox' | 'gallery';
 
 export interface SavedSummary {
   name: string;
@@ -106,6 +107,9 @@ interface StudioState {
   recordedAt: string | null;
   /** The live run's context, so a mock fired mid-run can carry its values. */
   context: RunContext | null;
+
+  /** Files a step can upload, from `fixtures/`. */
+  fixtures: Fixture[];
 
   /** Deliveries the inbox has seen, and the URL a provider should call. */
   hooks: ReceivedHook[];
@@ -154,6 +158,11 @@ interface StudioState {
   setConcurrency(id: string, concurrency: number | undefined): void;
   recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
   refreshTrends(): Promise<void>;
+
+  refreshFixtures(): Promise<void>;
+  uploadFixture(file: File): Promise<{ok: boolean; error?: string}>;
+  deleteFixture(name: string): Promise<void>;
+  seedFixtures(): Promise<string[]>;
 
   refreshInbox(): Promise<void>;
   clearInbox(): Promise<void>;
@@ -288,6 +297,7 @@ export const useStudio = create<StudioState>((set, get) => {
   recordedAt: null,
   sources: undefined,
   context: null,
+  fixtures: [],
   hooks: [],
   inboxUrl: '',
   mocks: [],
@@ -303,6 +313,7 @@ export const useStudio = create<StudioState>((set, get) => {
       });
       await get().refreshSaved();
       await get().refreshInbox();
+      await get().refreshFixtures();
     } catch {
       set({logs: [...get().logs, '! Could not reach the API. Is the dev server running?']});
     }
@@ -631,6 +642,42 @@ export const useStudio = create<StudioState>((set, get) => {
     } catch {
       /* a journey with no history is the normal case, not an error */
     }
+  },
+
+  // ---- files a step uploads ----
+
+  async refreshFixtures() {
+    try {
+      set({fixtures: (await (await fetch('/api/fixtures')).json()) as Fixture[]});
+    } catch {
+      /* the gallery is a panel; failing to load it should not break the app */
+    }
+  },
+
+  async uploadFixture(file) {
+    // Sent as raw bytes rather than multipart: there is exactly one file, its
+    // name is in the URL, and a body that is only the file needs no envelope.
+    const res = await fetch(`/api/fixtures/${encodeURIComponent(file.name)}`, {
+      method: 'PUT',
+      headers: {'content-type': file.type || 'application/octet-stream'},
+      body: file,
+    });
+    const payload = (await res.json()) as {error?: string};
+    await get().refreshFixtures();
+    return res.ok ? {ok: true} : {ok: false, error: payload.error};
+  },
+
+  async deleteFixture(name) {
+    await fetch(`/api/fixtures/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    await get().refreshFixtures();
+  },
+
+  async seedFixtures() {
+    const res = await fetch('/api/fixtures/seed', {method: 'POST'});
+    const {written} = (await res.json()) as {written: string[]};
+    await get().refreshFixtures();
+    if (written.length) set({logs: [...get().logs, `added ${written.length} edge-case fixtures`]});
+    return written;
   },
 
   // ---- the webhook inbox ----

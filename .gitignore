@@ -13,3 +13,9 @@ journey.config.local.json
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# The size-limit fixture is six megabytes of padding and is regenerated on
+# demand — `journey fixtures --seed`, or the button in the gallery. Everything
+# else in fixtures/ is committed, because a journey that uploads a document is
+# not reproducible without it.
+fixtures/large.png

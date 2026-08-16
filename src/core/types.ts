@@ -16,7 +16,7 @@
 /** Where a value lives once a node has produced it. */
 export type Scope = 'vars' | 'secrets';
 
-export type FieldKind = 'text' | 'number' | 'boolean' | 'select' | 'json' | 'secret';
+export type FieldKind = 'text' | 'number' | 'boolean' | 'select' | 'json' | 'secret' | 'file';
 
 /** One editable parameter on a node, rendered in the inspector. */
 export interface Field {
@@ -43,6 +43,14 @@ export interface RequestSpec {
   query?: Record<string, string>;
   headers?: Record<string, string>;
   body?: unknown;
+  /**
+   * A multipart body, for the steps that upload something.
+   *
+   * A file part names a fixture rather than carrying its bytes: the proxy reads
+   * it from disk on the way out, the same arrangement as secrets. A journey with
+   * a base64 passport scan inside it is not a file anybody would review.
+   */
+  form?: import('./fixtures').FormPart[];
   /** Name of an auth scheme declared in the config. Applied server-side. */
   auth?: string;
 }
@@ -215,6 +223,8 @@ export interface ResolvedRequest {
   url: string;
   headers: Record<string, string>;
   body?: unknown;
+  /** Multipart parts; file parts still name a fixture, not its contents. */
+  form?: import('./fixtures').FormPart[];
   auth?: string;
 }
 

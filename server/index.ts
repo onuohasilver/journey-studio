@@ -5,6 +5,7 @@ import {createAiRouter} from './ai';
 import {createApiRouter} from './proxy';
 import {createJourneyRouter} from './journeys';
 import {createInboxRouter} from './inbox';
+import {createFixtureRouter} from './fixtures';
 
 export function createApi(root = process.cwd()): Express {
   const app = express();
@@ -12,6 +13,8 @@ export function createApi(root = process.cwd()): Express {
   // Before the JSON-parsing routers: a delivery may arrive as anything, and the
   // inbox reads the raw body itself.
   app.use('/api', createInboxRouter(root));
+  // Before the JSON parsers: an upload is raw bytes, not JSON.
+  app.use('/api', createFixtureRouter(root));
   app.use('/api', createJourneyRouter(root));
   app.use('/api', createApiRouter(root));
   return app;

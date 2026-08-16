@@ -159,6 +159,9 @@ export function buildRequest(
     url: search ? `${path}?${search}` : path,
     headers: (resolve(spec.headers ?? {}, scope) as Record<string, string>) ?? {},
     body: spec.body === undefined ? undefined : resolve(spec.body, scope),
+    // Templated like everything else, so a part's value can reference an earlier
+    // step and a file part can be chosen by a `{{vars.document}}`.
+    ...(spec.form?.length ? {form: resolve(spec.form, scope) as typeof spec.form} : {}),
     auth: spec.auth,
   };
 }

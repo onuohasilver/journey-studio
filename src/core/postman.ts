@@ -16,6 +16,7 @@
 // reported as a warning rather than guessed at.
 
 import {inferNeeds, slugify, uniqueType} from './infer';
+import {isFilePart, type FormPart} from './fixtures';
 import type {Field, ImportResult, Method, NodeDef, Produces, RequestSpec} from './types';
 
 type Any = Record<string, any>;
@@ -245,18 +246,37 @@ function parseBody(body: any, name: string, warnings: string[]): unknown {
         return raw;
       }
     }
-    case 'urlencoded':
     case 'formdata': {
-      const out: Record<string, unknown> = {};
-      for (const f of body[body.mode] ?? []) {
+      // Kept as multipart rather than flattened to JSON, because a collection
+      // that posts a file is describing an upload and turning it into JSON
+      // changes what the request is.
+      const parts: FormPart[] = [];
+      let files = 0;
+      for (const f of body.formdata ?? []) {
         if (!f?.key || f.disabled) continue;
         if (f.type === 'file') {
-          warnings.push(`${name}: file upload fields aren't imported — attach the file by hand.`);
+          // The collection references a path on whoever exported it. The field
+          // is kept so the shape is right; the fixture is chosen in the gallery.
+          files += 1;
+          parts.push({name: f.key, file: ''});
           continue;
         }
+        parts.push({name: f.key, value: f.value ?? ''});
+      }
+      if (files) {
+        warnings.push(
+          `${name}: ${files} file field${files === 1 ? '' : 's'} kept as an upload — pick the fixture to send in the gallery.`,
+        );
+      }
+      return {form: parts};
+    }
+    case 'urlencoded': {
+      const out: Record<string, unknown> = {};
+      for (const f of body.urlencoded ?? []) {
+        if (!f?.key || f.disabled) continue;
         out[f.key] = f.value ?? '';
       }
-      warnings.push(`${name}: body was ${body.mode}; imported as JSON. Adjust the content type if the API needs the original encoding.`);
+      warnings.push(`${name}: body was urlencoded; imported as JSON. Adjust the content type if the API needs the original encoding.`);
       return out;
     }
     default:
@@ -307,8 +327,27 @@ function itemToNode(item: Any, group: string, state: WalkState): void {
   }
 
   const body = parseBody(req.body, name, state.warnings);
+
+  // A multipart body is not a JSON body: it comes back as parts, and each file
+  // part becomes a field the gallery fills in.
+  let form: FormPart[] | undefined;
   let bodyRef: unknown;
-  if (body !== undefined) {
+  if (body && typeof body === 'object' && 'form' in body) {
+    form = (body as {form: FormPart[]}).form.map((part) =>
+      isFilePart(part)
+        ? ((): FormPart => {
+            fields.push({
+              key: `file_${part.name}`,
+              label: `${part.name} (file)`,
+              kind: 'file',
+              help: 'Chosen from the gallery. The bytes are read by the proxy, never stored in the journey.',
+            });
+            defaults[`file_${part.name}`] = '';
+            return {name: part.name, file: `{{fields.file_${part.name}}}`};
+          })()
+        : part,
+    );
+  } else if (body !== undefined) {
     fields.push({key: 'body', label: 'Request body', kind: 'json'});
     defaults.body = body;
     bodyRef = '{{fields.body}}';
@@ -342,6 +381,7 @@ function itemToNode(item: Any, group: string, state: WalkState): void {
     ...(Object.keys(query).length ? {query} : {}),
     ...(Object.keys(headers).length ? {headers} : {}),
     ...(bodyRef !== undefined ? {body: bodyRef} : {}),
+    ...(form?.length ? {form} : {}),
     ...(auth ? {auth} : {}),
   };
 

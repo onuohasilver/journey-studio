@@ -130,6 +130,7 @@ npx journey run --tag smoke           # only journeys carrying that tag
 npx journey run --var country=NG      # seed a value into every run
 npx journey run --junit junit.xml     # results every CI renders natively
 npx journey init --ci                 # write a working GitHub Action
+npx journey fixtures --seed           # write the awkward upload fixtures
 npx journey sweep --env staging       # delete what earlier failed runs left behind
 npx journey run --parallel 4          # run four journeys at once
 npx journey run --otlp                # export metrics to your collector
@@ -314,6 +315,33 @@ concurrent.distinct   equals 1     # an idempotent endpoint returns one body, re
 
 The first success is what flows downstream, so `gives`, contract checking and snapshots carry on
 working exactly as they do for a single request.
+
+### Uploading a file
+
+Plenty of the flows worth testing send one: a KYC document, a receipt, a profile photo. Files live in
+`fixtures/` and are committed, because a journey that uploads `passport.png` is not reproducible on
+anybody else's machine unless `passport.png` came with it.
+
+A step names a fixture; **the bytes never enter the journey file**. The proxy reads it from disk on
+the way out, the same arrangement as secrets and for the same reason — a journey with a base64
+passport scan inside it is not a file anybody would review. The proxy also builds the multipart body,
+because `fetch` generates the boundary and a hand-written `content-type` would break it.
+
+The gallery ships the awkward uploads, because a valid photo tests the case that already works:
+
+| Fixture | Why |
+|---|---|
+| `valid-1x1.png` | A real PNG. The control. |
+| `empty.png` | Zero bytes with an image name. Plenty of handlers crash rather than reject. |
+| `not-an-image.png` | The extension lies — does the API sniff, or trust the name? |
+| `truncated.png` | A valid header and nothing after it. Catches decoders that read past the end. |
+| `large.png` | A **genuinely valid** 6MB PNG. An API that rejects a fake one for being corrupt has told you nothing about its size limit. |
+
+They are generated rather than committed as binaries — `journey fixtures --seed`, or the button in the
+gallery. A repo full of blobs is one nobody reviews.
+
+A Postman collection's file fields now import as real upload fields rather than the warning they used
+to produce; pick which fixture each one sends.
 
 ### Cleaning up after yourself
 
@@ -631,7 +659,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 408 tests, no network
+npm test        # 423 tests, no network
 npm run typecheck
 npm run build
 ```

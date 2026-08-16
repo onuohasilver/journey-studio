@@ -9,6 +9,7 @@ import {AiPanel} from './AiPanel';
 import {CasesPanel, ExplainPanel, InboxPanel, PacksPanel, ReportPanel, SavedPanel} from './Panels';
 import {ImportDialog} from './ImportDialog';
 import {RailTabs} from './RailTabs';
+import {GalleryPanel} from './GalleryPanel';
 
 register(BUILTINS);
 
@@ -21,6 +22,7 @@ const RAIL_TITLE: Record<Rail, string> = {
   saved: 'Saved journeys',
   data: 'Cases',
   inbox: 'Webhook inbox',
+  gallery: 'Files',
 };
 
 function Logs() {
@@ -158,6 +160,7 @@ export default function App() {
             {rail === 'saved' && <SavedPanel />}
             {rail === 'data' && <CasesPanel />}
             {rail === 'inbox' && <InboxPanel />}
+            {rail === 'gallery' && <GalleryPanel />}
           </div>
           <RailTabs />
         </aside>

@@ -16,6 +16,7 @@
 //   journey run --tag smoke              only journeys carrying that tag
 //   journey run --var env=eu             seed a value into every run
 //   journey run --mock-webhooks          deliver saved payloads instead of waiting
+//   journey fixtures --seed              write the awkward upload fixtures
 //   journey sweep                        delete what earlier failed runs left behind
 //   journey compare --env staging --with prod   the same journey, both sides
 //
@@ -173,6 +174,11 @@ journey init --ci
 
   Write .github/workflows/journeys.yml — the suite on every push and nightly.
 
+journey fixtures [--seed]
+
+  Lists the files a step can upload. --seed writes the awkward ones: an empty
+  file, one whose extension lies, a truncated image, and a large valid one.
+
 journey sweep [names…] --env <name>
 
   Deletes what earlier failed runs created and never cleaned up, by running each
@@ -208,7 +214,7 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
   // The CLI is the proxy: it holds the credentials and makes the calls, exactly
   // as the dev server does for the browser.
   const transport: Transport = {
-    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
+    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config, root),
   };
 
   const available = await listJourneys(root);
@@ -445,7 +451,7 @@ async function runIn(env: string, options: Options, root: string) {
     throw new Error(`No environment called "${env}". Known: ${config.environments.map((e) => e.name).join(', ')}`);
   }
   const transport: Transport = {
-    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
+    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config, root),
   };
 
   const wanted = select(await listJourneys(root), options, root);
@@ -532,7 +538,7 @@ async function sweep(options: Options, root: string): Promise<number> {
     throw new Error(`No environment called "${env}". Known: ${config.environments.map((e) => e.name).join(', ')}`);
   }
   const transport: Transport = {
-    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
+    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config, root),
   };
 
   const wanted = select(await listJourneys(root), options, root);
@@ -628,7 +634,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  if (command !== 'run' && command !== 'compare' && command !== 'sweep') {
+  if (command !== 'run' && command !== 'compare' && command !== 'sweep' && command !== 'fixtures') {
     process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
     return 2;
   }
@@ -638,6 +644,18 @@ async function main(): Promise<number> {
 
   if (command === 'compare') return compare(options, root);
   if (command === 'sweep') return sweep(options, root);
+
+  if (command === 'fixtures') {
+    const {seedEdgeCases, listFixtures} = await import('../server/fixtures');
+    if (rest.includes('--seed')) {
+      const written = await seedEdgeCases(root);
+      process.stdout.write(written.length ? `wrote ${written.join(', ')}\n` : 'already there\n');
+    }
+    for (const f of await listFixtures(root)) {
+      process.stdout.write(`  ${f.name.padEnd(24)} ${String(f.bytes).padStart(9)} bytes  ${f.contentType}\n`);
+    }
+    return 0;
+  }
 
   // A journey that waits for a callback needs somewhere for it to land. Opened
   // only when one actually waits, and only when the run is not using mocks.

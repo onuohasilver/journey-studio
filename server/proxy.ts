@@ -13,6 +13,8 @@ import type {Request, Response, Router} from 'express';
 import express from 'express';
 import {loadConfig, publicConfig, type ServerConfig} from './config';
 import {getToken} from './auth';
+import {readFixture} from './fixtures';
+import {contentTypeFor, isFilePart} from '../src/core/fixtures';
 import type {AuthScheme, ResolvedRequest} from '../src/core/types';
 
 /** Substitute `{{secrets.name}}` anywhere in a structure. */
@@ -69,6 +71,7 @@ export async function sendRequest(
   request: ResolvedRequest,
   envName: string,
   config: ServerConfig,
+  root = process.cwd(),
 ): Promise<{status: number; headers: Record<string, string>; body: unknown; durationMs: number}> {
   const environment = config.environments.find((e) => e.name === envName) ?? config.environments[0];
   if (!environment) throw new Error('No environments are configured.');
@@ -87,8 +90,35 @@ export async function sendRequest(
   const scheme = resolved.auth ? config.auth[resolved.auth] : undefined;
   await applyAuth(resolved.auth, scheme, headers, url);
 
-  let payload: string | undefined;
-  if (resolved.body !== undefined && resolved.body !== null && resolved.method !== 'GET' && resolved.method !== 'HEAD') {
+  let payload: string | FormData | undefined;
+
+  if (resolved.form?.length) {
+    // Built here rather than in the engine because this is the only side that
+    // may read a fixture's bytes — and because `fetch` sets the multipart
+    // boundary itself, which a hand-written content-type would break.
+    const form = new FormData();
+    for (const part of resolved.form) {
+      if (!isFilePart(part)) {
+        form.append(part.name, part.value ?? '');
+        continue;
+      }
+      const bytes = await readFixture(root, part.file);
+      if (!bytes) {
+        throw new Error(
+          `No fixture called "${part.file}". Add it in the gallery, or check the name on the "${part.name}" field.`,
+        );
+      }
+      form.append(
+        part.name,
+        new Blob([new Uint8Array(bytes)], {type: part.contentType ?? contentTypeFor(part.file)}),
+        part.filename ?? part.file,
+      );
+    }
+    payload = form;
+    // Deleted deliberately: any value here overrides the boundary `fetch`
+    // generates, and the API then cannot parse a body that is otherwise correct.
+    delete headers['content-type'];
+  } else if (resolved.body !== undefined && resolved.body !== null && resolved.method !== 'GET' && resolved.method !== 'HEAD') {
     if (typeof resolved.body === 'string') {
       payload = resolved.body;
       headers['content-type'] ??= 'text/plain';
@@ -147,7 +177,7 @@ export function createApiRouter(root = process.cwd()): Router {
       return;
     }
     try {
-      res.json(await sendRequest(request, env ?? '', loadConfig(root)));
+      res.json(await sendRequest(request, env ?? '', loadConfig(root), root));
     } catch (err) {
       // Network-level failures are the journey's problem to display, not a 500
       // from the tool — return them in the shape the engine already handles.

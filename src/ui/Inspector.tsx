@@ -42,8 +42,38 @@ function JsonField({value, onChange}: {value: unknown; onChange: (v: unknown) =>
   );
 }
 
+/** Picks a fixture by name, with a look at what you are picking. */
+function FileField({value, onChange}: {value: unknown; onChange: (v: unknown) => void}) {
+  const fixtures = useStudio((s) => s.fixtures);
+  const setRail = useStudio((s) => s.setRail);
+  const chosen = fixtures.find((f) => f.name === value);
+
+  return (
+    <>
+      <select value={String(value ?? '')} onChange={(e) => onChange(e.target.value)}>
+        <option value="">— nothing chosen —</option>
+        {fixtures.map((f) => (
+          <option key={f.name} value={f.name}>
+            {f.name} ({f.bytes >= 1024 * 1024 ? `${(f.bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(f.bytes / 1024))}KB`})
+          </option>
+        ))}
+      </select>
+      {chosen?.contentType.startsWith('image/') && chosen.bytes > 0 && (
+        <img className="pick" src={`/api/fixtures/${encodeURIComponent(chosen.name)}/raw`} alt={chosen.name} />
+      )}
+      {chosen?.note && <span className="help">{chosen.note}</span>}
+      {!fixtures.length && (
+        <button className="btn" style={{fontSize: 11}} onClick={() => setRail('gallery')}>
+          Add files to the gallery
+        </button>
+      )}
+    </>
+  );
+}
+
 function FieldInput({field, value, onChange}: {field: Field; value: unknown; onChange: (v: unknown) => void}) {
   if (field.kind === 'json') return <JsonField value={value} onChange={onChange} />;
+  if (field.kind === 'file') return <FileField value={value} onChange={onChange} />;
   if (field.kind === 'boolean') {
     return (
       <select value={String(Boolean(value))} onChange={(e) => onChange(e.target.value === 'true')}>
