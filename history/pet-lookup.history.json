@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "journey": "Pet lookup",
+  "entries": [
+    {
+      "at": "2026-08-16T10:57:17.467Z",
+      "env": "local",
+      "status": "passed",
+      "durationMs": 59,
+      "steps": [
+        {
+          "id": "s1",
+          "label": "Use a known pet",
+          "status": "passed",
+          "durationMs": 18,
+          "drift": 0
+        },
+        {
+          "id": "s2",
+          "label": "Read the pet",
+          "status": "passed",
+          "durationMs": 34,
+          "httpStatus": 200,
+          "drift": 0
+        },
+        {
+          "id": "s3",
+          "label": "List available pets",
+          "status": "passed",
+          "durationMs": 7,
+          "httpStatus": 200,
+          "drift": 0
+        }
+      ]
+    }
+  ]
+}

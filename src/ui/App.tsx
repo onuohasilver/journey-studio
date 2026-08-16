@@ -8,18 +8,19 @@ import {Inspector} from './Inspector';
 import {AiPanel} from './AiPanel';
 import {CasesPanel, ExplainPanel, InboxPanel, PacksPanel, ReportPanel, SavedPanel} from './Panels';
 import {ImportDialog} from './ImportDialog';
+import {RailTabs} from './RailTabs';
 
 register(BUILTINS);
 
 const RAIL_TITLE: Record<Rail, string> = {
   inspector: 'Step',
-  ai: '✳ Build with AI',
-  explain: '▤ Explain',
+  ai: 'Build with AI',
+  explain: 'Explain this journey',
   packs: 'Imported documents',
-  report: '▦ QA report',
+  report: 'QA report',
   saved: 'Saved journeys',
-  data: '▤ Cases',
-  inbox: '⇣ Webhook inbox',
+  data: 'Cases',
+  inbox: 'Webhook inbox',
 };
 
 function Logs() {
@@ -43,8 +44,6 @@ function Topbar({onImport}: {onImport: () => void}) {
   const config = useStudio((s) => s.config);
   const env = useStudio((s) => s.env);
   const setEnv = useStudio((s) => s.setEnv);
-  const rail = useStudio((s) => s.rail);
-  const setRail = useStudio((s) => s.setRail);
   const run = useStudio((s) => s.run);
   const stop = useStudio((s) => s.stop);
   const running = useStudio((s) => s.running);
@@ -54,15 +53,20 @@ function Topbar({onImport}: {onImport: () => void}) {
   const undoLabel = useStudio((s) => s.undoLabel);
   const redoLabel = useStudio((s) => s.redoLabel);
 
-  const toggle = (target: Rail) => setRail(rail === target ? 'inspector' : target);
-
   return (
     <header className="topbar">
       <span className="brand"><i />Journey Studio</span>
 
       <div className="envs" role="group" aria-label="Environment">
         {config.environments.map((e) => (
-          <button key={e.name} className="env" aria-pressed={env === e.name} onClick={() => setEnv(e.name)} title={e.baseUrl}>
+          <button
+            key={e.name}
+            className="env"
+            aria-pressed={env === e.name}
+            aria-label={`${e.name} — ${e.baseUrl}`}
+            onClick={() => setEnv(e.name)}
+            title={e.baseUrl}
+          >
             {e.name}
           </button>
         ))}
@@ -70,32 +74,27 @@ function Topbar({onImport}: {onImport: () => void}) {
       </div>
 
       <div className="tools">
-        <button
-          className="tool"
-          onClick={undo}
-          disabled={!undoLabel}
-          title={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
-          aria-label={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
-        >
-          ↶
-        </button>
-        <button
-          className="tool"
-          onClick={redo}
-          disabled={!redoLabel}
-          title={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
-          aria-label={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
-        >
-          ↷
-        </button>
+        <div className="undo">
+          <button
+            className="tool icon"
+            onClick={undo}
+            disabled={!undoLabel}
+            title={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
+            aria-label={undoLabel ? `Undo ${undoLabel}` : 'Nothing to undo'}
+          >
+            ↶
+          </button>
+          <button
+            className="tool icon"
+            onClick={redo}
+            disabled={!redoLabel}
+            title={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
+            aria-label={redoLabel ? `Redo ${redoLabel}` : 'Nothing to redo'}
+          >
+            ↷
+          </button>
+        </div>
         <button className="tool" onClick={onImport}>Import</button>
-        <button className="tool" aria-pressed={rail === 'packs'} onClick={() => toggle('packs')}>Documents</button>
-        <button className="tool" aria-pressed={rail === 'ai'} onClick={() => toggle('ai')}>Build with AI</button>
-        <button className="tool" aria-pressed={rail === 'explain'} onClick={() => toggle('explain')}>Explain</button>
-        <button className="tool" aria-pressed={rail === 'data'} onClick={() => toggle('data')}>Cases</button>
-        <button className="tool" aria-pressed={rail === 'saved'} onClick={() => toggle('saved')}>Journeys</button>
-        <button className="tool" aria-pressed={rail === 'inbox'} onClick={() => toggle('inbox')}>Inbox</button>
-        <button className="tool" aria-pressed={rail === 'report'} onClick={() => toggle('report')}>Report</button>
         {running ? (
           <button className="tool stop" onClick={stop}>■ Stop</button>
         ) : (
@@ -149,15 +148,18 @@ export default function App() {
           <Logs />
         </div>
         <aside className="rail">
-          <div className="rail-head"><b>{RAIL_TITLE[rail]}</b></div>
-          {rail === 'inspector' && <Inspector />}
-          {rail === 'ai' && <AiPanel />}
-          {rail === 'explain' && <ExplainPanel />}
-          {rail === 'packs' && <PacksPanel onImport={() => setImporting(true)} />}
-          {rail === 'report' && <ReportPanel />}
-          {rail === 'saved' && <SavedPanel />}
-          {rail === 'data' && <CasesPanel />}
-          {rail === 'inbox' && <InboxPanel />}
+          <div className="rail-main">
+            <div className="rail-head"><b>{RAIL_TITLE[rail]}</b></div>
+            {rail === 'inspector' && <Inspector />}
+            {rail === 'ai' && <AiPanel />}
+            {rail === 'explain' && <ExplainPanel />}
+            {rail === 'packs' && <PacksPanel onImport={() => setImporting(true)} />}
+            {rail === 'report' && <ReportPanel />}
+            {rail === 'saved' && <SavedPanel />}
+            {rail === 'data' && <CasesPanel />}
+            {rail === 'inbox' && <InboxPanel />}
+          </div>
+          <RailTabs />
         </aside>
       </div>
       {importing && <ImportDialog onClose={() => setImporting(false)} />}

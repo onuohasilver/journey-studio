@@ -304,7 +304,8 @@ export function ReportPanel() {
         </>
       )}
 
-      {trends.length > 0 && (
+      {/* A trend of one point is not a trend — it repeats the step list below it. */}
+      {trends.length > 0 && trends[0].results.length > 1 && (
         <>
           <span className="caps">Over the last {trends[0].results.length} runs</span>
           {trends.map((trend) => (
