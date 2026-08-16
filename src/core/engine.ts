@@ -48,7 +48,15 @@ export interface RunHooks {
 
 export interface RunOptions {
   env: string;
-  lookup(type: string): NodeDef | undefined;
+  /**
+   * The definition for a step.
+   *
+   * Takes the node, not just its type, because one definition can produce
+   * different requests per node: the raw HTTP node's method and body come from
+   * what the user typed. Looking up by type alone gave every raw step the first
+   * one's config, and made a journey run differently in CI than in the studio.
+   */
+  lookup(type: string, node?: JourneyNode): NodeDef | undefined;
   transport: Transport;
   hooks?: RunHooks;
   /** Run only this node and everything downstream of it. */
@@ -203,6 +211,58 @@ async function runControl(
   }
 }
 
+/**
+ * Send once, or send a burst all at once.
+ *
+ * Fired with `Promise.all` rather than in sequence on purpose: the point is for
+ * them to be in flight together. A loop with no awaits between sends would still
+ * serialise on the transport, and the race would never happen.
+ *
+ * The response handed back is the first success — or the first response when
+ * none succeeded — so `gives`, chaining, contract checks and snapshots carry on
+ * working exactly as they do for a single request. What the burst did as a whole
+ * rides along on `concurrent`.
+ */
+async function send(
+  transport: Transport,
+  request: ResolvedRequest,
+  env: string,
+  concurrency: number,
+): Promise<HttpResponse> {
+  if (concurrency <= 1) return transport.send(request, env);
+
+  const all = await Promise.all(
+    Array.from({length: concurrency}, () =>
+      transport.send(request, env).catch(
+        (err): HttpResponse => ({
+          // A transport-level failure is a result too — losing it would make a
+          // burst that half-crashed look like a burst that half-succeeded.
+          status: 0,
+          headers: {},
+          body: {error: err instanceof Error ? err.message : String(err)},
+          durationMs: 0,
+        }),
+      ),
+    ),
+  );
+
+  const ok = (r: HttpResponse) => r.status >= 200 && r.status < 300;
+  const representative = all.find(ok) ?? all[0];
+  const bodies = new Set(all.map((r) => JSON.stringify(r.body)));
+
+  return {
+    ...representative,
+    concurrent: {
+      sent: all.length,
+      succeeded: all.filter(ok).length,
+      failed: all.filter((r) => !ok(r)).length,
+      statuses: all.map((r) => r.status),
+      distinct: bodies.size,
+      slowestMs: Math.max(...all.map((r) => r.durationMs)),
+    },
+  };
+}
+
 /** How often the inbox is asked. Small enough to feel instant, large enough not to spin. */
 const POLL_MS = 250;
 
@@ -340,7 +400,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
   if (wanted) {
     for (const node of ordered) {
       if (wanted.has(node.id)) continue;
-      const def = lookup(node.type);
+      const def = lookup(node.type, node);
       const res = ctx.responses[node.id];
       if (def && res) extract(def.gives, res, ctx);
     }
@@ -354,7 +414,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
    * waiting to happen in the code nobody watches.
    */
   const runOne = async (node: JourneyNode): Promise<RunStatus> => {
-    const def = lookup(node.type);
+    const def = lookup(node.type, node);
     const label = node.label ?? def?.label ?? node.type;
 
     if (!def) {
@@ -435,7 +495,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
 
       for (;;) {
         attempts += 1;
-        res = await transport.send(request, env);
+        res = await send(transport, request, env, node.concurrency ?? 1);
         assertions = [...runAssertions(res, must), ...runAssertions(res, until)];
         failed = assertions.filter((a) => !a.pass);
 
@@ -529,8 +589,10 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         shapeBreaks.length ? summariseShape(shapeChanges) : '',
         overBudget ? `${overBudget.actualMs}ms over a ${overBudget.budgetMs}ms budget` : '',
       ].filter(Boolean);
+      const burst = res.concurrent;
       hooks?.onLog?.(
         `✓ ${label} · ${res.status} · ${res.durationMs}ms` +
+          `${burst ? ` · ${burst.sent} at once → ${burst.succeeded} ok, ${burst.distinct} distinct` : ''}` +
           `${attempts > 1 ? ` · settled after ${attempts} tries` : ''}` +
           `${drift.length ? ` · ⚠ ${drift.join(', ')}` : ''}`,
       );
@@ -579,7 +641,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
     for (const node of teardown) {
       if (signal?.aborted) break;
       if ((await runOne(node)) === 'failed') {
-        leaked.push(node.label ?? lookup(node.type)?.label ?? node.type);
+        leaked.push(node.label ?? lookup(node.type, node)?.label ?? node.type);
       }
     }
   }

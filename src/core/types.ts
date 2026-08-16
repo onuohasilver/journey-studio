@@ -134,11 +134,35 @@ export interface NodeDef {
 
 export type RunStatus = 'idle' | 'queued' | 'running' | 'passed' | 'failed' | 'skipped';
 
+/**
+ * What happened when a step fired several identical requests at once.
+ *
+ * `distinct` is the field worth having: an idempotent endpoint answers a burst
+ * with one body repeated, and a broken one answers with five different ids and
+ * five rows in the ledger.
+ */
+export interface ConcurrentSummary {
+  sent: number;
+  /** How many came back 2xx. For a double-spend guard this should be 1. */
+  succeeded: number;
+  failed: number;
+  statuses: number[];
+  /** Distinct response bodies across the burst. 1 means it deduplicated. */
+  distinct: number;
+  slowestMs: number;
+}
+
 export interface HttpResponse {
   status: number;
   headers: Record<string, string>;
   body: unknown;
   durationMs: number;
+  /**
+   * Present only when the step fired a burst. Kept on the response so
+   * assertions reach it as `concurrent.succeeded` with no new machinery, while
+   * `gives`, contract checking and snapshots go on reading `body` as before.
+   */
+  concurrent?: ConcurrentSummary;
 }
 
 /**
@@ -230,6 +254,14 @@ export interface JourneyNode {
   pollEveryMs?: number;
   /** How long to keep trying before the step fails. */
   pollTimeoutMs?: number;
+  /**
+   * Fire this many identical requests at once.
+   *
+   * The whole class of race conditions — double spend, idempotency-key reuse,
+   * two transfers against one balance — is invisible to a runner that only ever
+   * sends one request at a time. This is how you see it.
+   */
+  concurrency?: number;
 }
 
 export interface JourneyEdge {

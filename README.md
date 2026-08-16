@@ -88,6 +88,7 @@ npx journey run -u                    # record what the responses look like now
 npx journey run --strict              # fail on drift, not just on assertions
 npx journey run --mock-webhooks       # replay saved callbacks instead of waiting
 npx journey compare --env a --with b  # the same journey against two environments
+npx journey run --no-history          # do not append this run to history/
 ```
 
 Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
@@ -226,6 +227,43 @@ never read as proof the integration works.
 Locally the inbox has to be reachable from wherever the provider runs, which means a tunnel; the
 panel shows the URL it believes it is on, taking the forwarded host over anything configured.
 
+### Waiting for a condition, instead of sleeping
+
+A step can declare what it is waiting for, and be re-sent until that holds:
+
+```
+keep trying until   body.status equals settled
+every               1000ms
+give up after       30000ms
+```
+
+This exists to kill the fixed sleep, which is the single largest source of flaky
+API tests — and slower than it needs to be on a good day while still being wrong on a bad one. Hard
+failures are retried too, because "not ready yet" usually arrives as a 404. A step with no condition
+still fails fast: retrying everything would turn one broken endpoint into a suite that takes an hour
+to say so.
+
+### Firing several requests at once
+
+Set **fire at once** to 5 and the step sends five identical requests simultaneously. The whole class
+of race conditions — double spend, idempotency-key reuse, two transfers against one balance — is
+invisible to a runner that only ever sends one request at a time.
+
+What came back is available to assertions with no new machinery:
+
+```
+concurrent.succeeded  equals 1     # a double-spend guard should let exactly one through
+concurrent.distinct   equals 1     # an idempotent endpoint returns one body, repeated
+```
+
+```
+✗ Charge the card · 201 — 5 at once → 5 ok, 5 distinct    # five charges, five ledger rows
+✓ Charge the card · 201 — 5 at once → 1 ok, 2 distinct    # the guard held
+```
+
+The first success is what flows downstream, so `gives`, contract checking and snapshots carry on
+working exactly as they do for a single request.
+
 ### Cleaning up after yourself
 
 Mark a step as a **clean-up step** and it runs after the journey, *whether the journey passed or
@@ -286,6 +324,22 @@ makes them different environments. What should not differ is the contract. A fie
 returns is a finding here even though it is noise against a recorded baseline: it usually means the
 two are running different builds. Timing is only mentioned when one side is both relatively *and*
 absolutely worse, so a 3ms/8ms endpoint stays quiet.
+
+### When did this start failing?
+
+Every run appends a small row to `history/`, and the report shows a tick per run per step:
+
+```
+Read the order  ▮▮▯▮▮▯     failing since 2026-08-16 00:31
+```
+
+Deliberately small — a full report per run would be megabytes a week and nobody would commit it. What
+is kept is the shape of the answer: per step, did it pass, how long, did it drift.
+
+The failing-since line reports the *current* run of failures, not the first one that ever happened. A
+step that broke in January, was fixed, and broke again yesterday is failing since yesterday — saying
+"since January" would send someone to the wrong commit. History is keyed on step id, so renaming a
+step does not silently start its history over.
 
 ### What a report carries
 
@@ -377,7 +431,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 226 tests, no network
+npm test        # 272 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -406,8 +460,14 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Timing budgets, judged at p95 across runs and cases
 - [x] Environment comparison — the same journey against two, diffed
 - [x] Webhook inbox for async steps, with correlation and replayable mocks
-- [ ] Scheduled runs with a history, so drift has a timeline
-- [ ] Assertion editor in the inspector
+- [x] OAuth2, with tokens fetched, cached and refreshed server-side
+- [x] Poll until a condition holds, instead of sleeping
+- [x] Assertion editor, with paths from the response and AI suggestions
+- [x] Run history, so drift has a timeline
+- [x] Concurrent bursts, to catch races a one-at-a-time runner cannot see
+- [ ] Shared setup journeys, so a suite logs in once rather than twenty times
+- [ ] `journey init --ci`, writing a working GitHub Action
+- [ ] Sweep, to clean up records earlier failed runs left behind
 
 ## License
 

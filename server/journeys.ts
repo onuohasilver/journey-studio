@@ -11,12 +11,20 @@ import type {Request, Response, Router} from 'express';
 import express from 'express';
 import {fileNameFor, readSaved, type SavedJourney} from '../src/core/persist';
 import {packSnapshot, readSnapshot, snapshotNameFor, type Shape, type SnapshotFile} from '../src/core/snapshot';
+import {
+  appendHistory,
+  entriesFrom,
+  historyNameFor,
+  readHistory,
+  type HistoryFile,
+} from '../src/core/history';
 import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from './config';
 import type {QaReport} from '../src/core/report';
 
 const DIR = 'journeys';
 const SNAPSHOT_DIR = 'snapshots';
+const HISTORY_DIR = 'history';
 
 function dirFor(root: string): string {
   return path.join(root, DIR);
@@ -64,6 +72,42 @@ export async function saveSnapshot(
   const packed = packSnapshot(meta.journey ?? name, nodes, {env: meta.env});
   await writeFile(file, `${JSON.stringify(packed, null, 2)}\n`, 'utf8');
   return path.basename(file);
+}
+
+function historyPath(root: string, name: string): string | undefined {
+  const journeyFile = safePath(root, name);
+  if (!journeyFile) return undefined;
+  return path.join(root, HISTORY_DIR, historyNameFor(path.basename(journeyFile)));
+}
+
+export async function loadHistory(root: string, name: string): Promise<HistoryFile | undefined> {
+  const file = historyPath(root, name);
+  if (!file || !existsSync(file)) return undefined;
+  return readHistory(await readFile(file, 'utf8'));
+}
+
+/**
+ * Append this run to the journey's history.
+ *
+ * Failing to record history must never fail a run: the report is the product,
+ * and a full disk should not turn a green suite red.
+ */
+export async function recordHistory(
+  root: string,
+  name: string,
+  report: import('../src/core/report').QaReport,
+): Promise<string | undefined> {
+  const file = historyPath(root, name);
+  if (!file) return undefined;
+  try {
+    const existing = await loadHistory(root, name);
+    const next = appendHistory(existing, report.journeys[0]?.name ?? name, entriesFrom(report));
+    await mkdir(path.dirname(file), {recursive: true});
+    await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    return path.basename(file);
+  } catch {
+    return undefined;
+  }
 }
 
 export interface JourneySummary {
@@ -152,6 +196,21 @@ export function createJourneyRouter(root = process.cwd()): Router {
     }
     await unlink(file);
     res.status(204).end();
+  });
+
+  router.get('/journeys/:name/history', async (req: Request, res: Response) => {
+    const history = await loadHistory(root, String(req.params.name));
+    res.json(history ?? {version: 1, journey: String(req.params.name), entries: []});
+  });
+
+  router.post('/journeys/:name/history', async (req: Request, res: Response) => {
+    const report = (req.body as {report?: import('../src/core/report').QaReport})?.report;
+    if (!report?.totals) {
+      res.status(400).json({error: 'No report to record.'});
+      return;
+    }
+    const file = await recordHistory(root, String(req.params.name), report);
+    res.json({ok: Boolean(file), file});
   });
 
   router.get('/journeys/:name/snapshot', async (req: Request, res: Response) => {

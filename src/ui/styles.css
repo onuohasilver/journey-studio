@@ -346,3 +346,30 @@ kbd {
   font-family: var(--mono);
   padding-left: 2px;
 }
+
+/* A run of ticks per step: green passed, red failed, hollow did-not-run. The
+   point is the eye catching where the colour changes, not any single tick. */
+.trend {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.trend .nm { font-size: 12px; font-weight: 600; }
+.trend .ticks { display: flex; gap: 2px; }
+.trend .ticks i {
+  width: 5px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--brand);
+}
+.trend .ticks i.failed { background: var(--danger); }
+.trend .ticks i.skipped { background: var(--line); }
+.trend .ticks i.none { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.trend .since {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--danger);
+}

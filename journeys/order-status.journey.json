@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "name": "Order status",
+  "description": "Reads the order.",
+  "savedAt": "2026-08-16T00:00:00.000Z",
+  "env": "local",
+  "journey": {
+    "name": "Order status",
+    "nodes": [
+      {
+        "id": "s1",
+        "type": "http.request",
+        "label": "Read the order",
+        "config": {
+          "method": "GET",
+          "path": "/order"
+        },
+        "position": {
+          "x": 200,
+          "y": 180
+        },
+        "assertions": [
+          {
+            "path": "body.status",
+            "op": "eq",
+            "expected": "settled"
+          }
+        ]
+      }
+    ],
+    "edges": []
+  },
+  "defs": []
+}

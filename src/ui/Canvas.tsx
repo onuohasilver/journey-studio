@@ -24,6 +24,7 @@ interface CardData extends Record<string, unknown> {
   control?: boolean;
   teardown?: boolean;
   budgetMs?: number;
+  concurrency?: number;
 }
 
 /** The method tile is the fastest read on a canvas: colour tells you the verb. */
@@ -46,6 +47,7 @@ function JourneyCard({data, selected}: NodeProps) {
         <span className="sub">
           {d.teardown ? 'clean-up · ' : ''}
           {d.call}
+          {d.concurrency ? ` · ×${d.concurrency} at once` : ''}
           {d.budgetMs ? ` · ≤${d.budgetMs}ms` : ''}
         </span>
       </span>
@@ -83,6 +85,7 @@ function Flow() {
             status: states[n.id]?.status ?? 'idle',
             teardown: n.teardown,
             budgetMs: n.budgetMs,
+            concurrency: n.concurrency,
           } satisfies CardData,
         };
       }),

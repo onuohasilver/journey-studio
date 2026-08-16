@@ -3,6 +3,7 @@ import {topoOrder} from '../core/graph';
 import {summariseContract} from '../core/contract';
 import {summariseShape} from '../core/snapshot';
 import {summariseDrift} from '../core/report';
+import {describeTrend} from '../core/history';
 import {casesFromCsv, casesToCsv} from '../core/csv';
 import {useStudio} from '../state/store';
 
@@ -233,6 +234,7 @@ export function ReportPanel() {
   const select = useStudio((s) => s.select);
   const recordSnapshot = useStudio((s) => s.recordSnapshot);
   const recordedAt = useStudio((s) => s.recordedAt);
+  const trends = useStudio((s) => s.trends);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<{ok: boolean; error?: string} | null>(null);
   const [recorded, setRecorded] = useState<{ok: boolean; error?: string; nodes?: number} | null>(null);
@@ -298,6 +300,25 @@ export function ReportPanel() {
                 </span>
               </span>
             </button>
+          ))}
+        </>
+      )}
+
+      {trends.length > 0 && (
+        <>
+          <span className="caps">Over the last {trends[0].results.length} runs</span>
+          {trends.map((trend) => (
+            <div className="trend" key={trend.id}>
+              <span className="nm">{trend.label}</span>
+              <span className="ticks" aria-label={describeTrend(trend)}>
+                {trend.results.map((r, i) => (
+                  <i key={i} className={r ?? 'none'} title={r ?? 'did not run'} />
+                ))}
+              </span>
+              {trend.failingSince && (
+                <span className="since">failing since {trend.failingSince.slice(0, 16).replace('T', ' ')}</span>
+              )}
+            </div>
           ))}
         </>
       )}

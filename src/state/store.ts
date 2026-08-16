@@ -6,7 +6,7 @@
 
 import {create} from 'zustand';
 import {runJourneyCases, shapesFrom, type Transport} from '../core/engine';
-import {materialise} from '../core/builtins';
+import {withMaterialised} from '../core/builtins';
 import {topoOrder} from '../core/graph';
 import {resolve} from '../core/template';
 import {allDefs, lookup as registryLookup, register, registerPack, removePack, allPacks, type Pack} from '../core/registry';
@@ -18,6 +18,7 @@ import {requestAssertions, requestExplanation, requestPlan, requestRevision, typ
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
+import {trendsFrom, type HistoryFile, type StepTrend} from '../core/history';
 import type {HookMatch, HookMock, InboxSource, ReceivedHook} from '../core/inbox';
 import {fileNameFor, packJourney, readSaved, type SavedJourney} from '../core/persist';
 import type {
@@ -27,7 +28,6 @@ import type {
   Journey,
   JourneyCase,
   JourneyNode,
-  NodeDef,
   NodeState,
   ResolvedRequest,
   RunContext,
@@ -83,6 +83,9 @@ interface StudioState {
   saved: SavedSummary[];
   slackConfigured: boolean;
 
+  /** Per-step trends from previous runs — the answer to "when did this start?". */
+  trends: StepTrend[];
+
   /** Recorded response shapes this journey is being compared against. */
   baseline: Record<string, Shape> | null;
   recordedAt: string | null;
@@ -132,7 +135,9 @@ interface StudioState {
   setAssertions(id: string, assertions: Assertion[] | undefined): void;
   setUntil(id: string, until: Assertion[] | undefined): void;
   setPoll(id: string, patch: {pollEveryMs?: number; pollTimeoutMs?: number}): void;
+  setConcurrency(id: string, concurrency: number | undefined): void;
   recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
+  refreshTrends(): Promise<void>;
 
   refreshInbox(): Promise<void>;
   clearInbox(): Promise<void>;
@@ -195,16 +200,14 @@ const inboxSource: InboxSource = {
   },
 };
 
-/** Node defs with the raw-HTTP node's request built from what the user typed. */
-function lookupFor(journey: Journey) {
-  return (type: string): NodeDef | undefined => {
-    const def = registryLookup(type);
-    if (!def) return undefined;
-    if (def.type !== 'http.request') return def;
-    const node = journey.nodes.find((n) => n.type === type);
-    return node ? materialise(def, node.config) : def;
-  };
-}
+/**
+ * Node defs with the raw-HTTP node's request built from what each node holds.
+ *
+ * Takes the node rather than finding one by type: the old version handed every
+ * raw HTTP step the *first* such node's config, so a journey with two of them
+ * sent the same request twice.
+ */
+const lookupFor = () => withMaterialised(registryLookup);
 
 let abort: AbortController | undefined;
 
@@ -262,6 +265,7 @@ export const useStudio = create<StudioState>((set, get) => {
   report: null,
   saved: [],
   slackConfigured: false,
+  trends: [],
   baseline: null,
   recordedAt: null,
   sources: undefined,
@@ -386,7 +390,7 @@ export const useStudio = create<StudioState>((set, get) => {
 
     const runs = await runJourneyCases(journey, {
       env,
-      lookup: lookupFor(journey),
+      lookup: lookupFor(),
       transport,
       startAt,
       priorResponses,
@@ -417,7 +421,7 @@ export const useStudio = create<StudioState>((set, get) => {
     const finalStates = {...get().states, ...(shown?.result.states ?? {})};
 
     const journeyReports = runs.map((run) =>
-      buildJourneyReport(journey, run.result.states, run.result.context, lookupFor(journey), {
+      buildJourneyReport(journey, run.result.states, run.result.context, lookupFor(), {
         caseName: run.case?.name,
       }),
     );
@@ -443,6 +447,22 @@ export const useStudio = create<StudioState>((set, get) => {
       }),
       logs: [...get().logs, tail],
     });
+
+    // Recorded after the fact and never allowed to affect the verdict: the
+    // report is the product, and a full disk must not turn a green suite red.
+    try {
+      const report = get().report;
+      if (report) {
+        await fetch(`/api/journeys/${encodeURIComponent(fileNameFor(journey.name))}/history`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({report}),
+        });
+        await get().refreshTrends();
+      }
+    } catch {
+      /* history is a nicety; losing it should not disturb the run */
+    }
   },
 
   stop() {
@@ -542,6 +562,19 @@ export const useStudio = create<StudioState>((set, get) => {
     );
   },
 
+  setConcurrency(id, concurrency) {
+    mutate(
+      'change concurrency',
+      (journey) => ({
+        ...journey,
+        nodes: journey.nodes.map((n) =>
+          n.id === id ? {...n, concurrency: concurrency && concurrency > 1 ? concurrency : undefined} : n,
+        ),
+      }),
+      `concurrency:${id}`,
+    );
+  },
+
   async recordSnapshot() {
     const {journey, states, env} = get();
     const nodes = shapesFrom(states);
@@ -564,6 +597,18 @@ export const useStudio = create<StudioState>((set, get) => {
     });
     await get().refreshSaved();
     return {ok: true, nodes: payload.nodes};
+  },
+
+  async refreshTrends() {
+    const {journey} = get();
+    if (!journey.nodes.length) return;
+    try {
+      const res = await fetch(`/api/journeys/${encodeURIComponent(fileNameFor(journey.name))}/history`);
+      if (!res.ok) return;
+      set({trends: trendsFrom((await res.json()) as HistoryFile)});
+    } catch {
+      /* a journey with no history is the normal case, not an error */
+    }
   },
 
   // ---- the webhook inbox ----
@@ -690,6 +735,7 @@ export const useStudio = create<StudioState>((set, get) => {
       rail: 'inspector',
       baseline,
       recordedAt,
+      trends: [],
       sources: result.saved.sources,
       logs: [
         `opened "${result.saved.name}"`,
@@ -699,6 +745,7 @@ export const useStudio = create<StudioState>((set, get) => {
     });
     history.clear();
     set(labels());
+    await get().refreshTrends();
     return result.missingTypes;
   },
 

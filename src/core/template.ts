@@ -46,6 +46,9 @@ export function readResponse(res: HttpResponse, path: string): unknown {
     // Header names are case-insensitive; the map is normalised to lower case.
     return res.headers[path.slice('headers.'.length).toLowerCase()];
   }
+  // Only present on a step that fired a burst, so `concurrent.succeeded` works
+  // as an assertion path without teaching assertions anything new.
+  if (path.startsWith('concurrent.')) return readPath(res.concurrent, path.slice('concurrent.'.length));
   if (path === 'body') return res.body;
   if (path.startsWith('body.')) return readPath(res.body, path.slice('body.'.length));
   // Bare paths are the common case and mean "into the body".

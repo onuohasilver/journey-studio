@@ -126,6 +126,23 @@ export const AWAIT_WEBHOOK: NodeDef = {
 export const BUILTINS: NodeDef[] = [HTTP_REQUEST, SET_VALUES, ASSERT, DELAY, AWAIT_WEBHOOK];
 
 /**
+ * Definitions, with the raw HTTP node's request built from what each node holds.
+ *
+ * Shared by the studio, the CLI and `compare` so a journey cannot behave one way
+ * in the browser and another in CI — which it did, because only the studio was
+ * applying this.
+ */
+export function withMaterialised(
+  registryLookup: (type: string) => NodeDef | undefined,
+): (type: string, node?: {config: Record<string, unknown>}) => NodeDef | undefined {
+  return (type, node) => {
+    const def = registryLookup(type);
+    if (!def || !node) return def;
+    return materialise(def, node.config);
+  };
+}
+
+/**
  * The raw HTTP node is the one definition whose request is not fixed: its
  * method, headers and body come from what the user typed. Resolving that here
  * keeps the engine free of node-type special cases.

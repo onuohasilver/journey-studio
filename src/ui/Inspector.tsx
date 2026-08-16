@@ -193,6 +193,7 @@ export function Inspector() {
   const setAssertions = useStudio((s) => s.setAssertions);
   const setUntil = useStudio((s) => s.setUntil);
   const setPoll = useStudio((s) => s.setPoll);
+  const setConcurrency = useStudio((s) => s.setConcurrency);
   const suggestAssertions = useStudio((s) => s.suggestAssertions);
   const [suggesting, setSuggesting] = useState(false);
   const [suggested, setSuggested] = useState<(AssertionSuggestions & {error?: string}) | null>(null);
@@ -381,6 +382,24 @@ export function Inspector() {
           </span>
         </span>
       </label>
+
+      <div className="field">
+        <label htmlFor="node-concurrency">Fire at once</label>
+        <input
+          id="node-concurrency"
+          type="number"
+          min={1}
+          max={50}
+          placeholder="1"
+          value={node.concurrency ?? ''}
+          onChange={(e) => setConcurrency(node.id, e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+        <span className="help">
+          Sends this many identical requests simultaneously — how you see double spend, idempotency-key
+          reuse and other races that a one-at-a-time runner cannot. Check the result with{' '}
+          <code>concurrent.succeeded</code> or <code>concurrent.distinct</code>.
+        </span>
+      </div>
 
       <div className="field">
         <label htmlFor="node-budget">Time budget (ms)</label>

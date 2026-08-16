@@ -31,6 +31,8 @@ export interface StepReport {
   overBudget?: {budgetMs: number; actualMs: number};
   /** True for a cleanup step, which runs after the journey either way. */
   teardown?: boolean;
+  /** What happened when this step fired a burst of identical requests. */
+  concurrent?: import('./types').ConcurrentSummary;
   /** The webhook this step waited for came from a saved mock, not the real thing. */
   mocked?: boolean;
   /** Only for a failed step: what was sent, so the failure is reproducible. */
@@ -148,6 +150,7 @@ export function buildJourneyReport(
       ...(state.overBudget ? {overBudget: state.overBudget} : {}),
       ...(state.teardown ? {teardown: true} : {}),
       ...(state.mocked ? {mocked: true} : {}),
+      ...(state.response?.concurrent ? {concurrent: state.response.concurrent} : {}),
       ...(state.status === 'failed' && state.sent
         ? {request: {method: state.sent.method, url: state.sent.url}}
         : {}),
@@ -342,7 +345,11 @@ export function summariseText(report: QaReport): string {
     for (const step of journey.steps) {
       const mark = step.status === 'passed' ? '  ✓' : step.status === 'failed' ? '  ✗' : '  ·';
       const timing = step.durationMs === undefined ? '' : ` (${step.durationMs}ms)`;
+      const burst = step.concurrent
+        ? `${step.concurrent.sent} at once → ${step.concurrent.succeeded} ok, ${step.concurrent.distinct} distinct`
+        : '';
       const drift = [
+        burst,
         step.contract.length ? summariseContract(step.contract) : '',
         step.shapeChanges.some((c) => c.severity !== 'info') ? summariseShape(step.shapeChanges) : '',
         step.overBudget ? `${step.overBudget.actualMs}ms over a ${step.overBudget.budgetMs}ms budget` : '',

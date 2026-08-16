@@ -23,7 +23,7 @@ import path from 'node:path';
 import express from 'express';
 import {runJourney, runJourneyCases, shapesFrom, type Transport} from '../src/core/engine';
 import {register, lookup, resetRegistry} from '../src/core/registry';
-import {BUILTINS} from '../src/core/builtins';
+import {BUILTINS, withMaterialised} from '../src/core/builtins';
 import {casesFromCsv} from '../src/core/csv';
 import {checkJourney} from '../src/core/graph';
 import {
@@ -36,10 +36,11 @@ import {
   type QaReport,
 } from '../src/core/report';
 import {compareRuns, summariseComparison} from '../src/core/compare';
+import {describeTrend, trendsFrom} from '../src/core/history';
 import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from '../server/config';
 import {sendRequest} from '../server/proxy';
-import {listJourneys, loadJourney, loadSnapshot, saveSnapshot} from '../server/journeys';
+import {listJourneys, loadJourney, loadSnapshot, saveSnapshot, loadHistory, recordHistory} from '../server/journeys';
 import {createInboxRouter, inbox, loadMocks} from '../server/inbox';
 import type {Journey, NodeState, ResolvedRequest} from '../src/core/types';
 
@@ -53,6 +54,7 @@ interface Options {
   strictContract: boolean;
   strictSnapshot: boolean;
   strictBudget: boolean;
+  noHistory: boolean;
   updateSnapshots: boolean;
   mockWebhooks: boolean;
   inboxPort: number;
@@ -69,6 +71,7 @@ function parseArgs(argv: string[]): Options {
     strictContract: false,
     strictSnapshot: false,
     strictBudget: false,
+    noHistory: false,
     updateSnapshots: false,
     mockWebhooks: false,
     inboxPort: Number(process.env.INBOX_PORT) || 5179,
@@ -88,6 +91,7 @@ function parseArgs(argv: string[]): Options {
       case '--strict-budget': options.strictBudget = true; break;
       case '--with': options.with = argv[++i]; break;
       case '--mock-webhooks': options.mockWebhooks = true; break;
+      case '--no-history': options.noHistory = true; break;
       case '--inbox-port': options.inboxPort = Number(argv[++i]) || 5179; break;
       // One flag for "any drift is a failure", because that is the thing people
       // actually want and nobody remembers three flags for it.
@@ -121,6 +125,7 @@ const USAGE = `journey run [names…] [options]
   --strict-snapshot     fail only on a response whose shape moved
   --strict-budget       fail only on a step slower than its declared budget
   --mock-webhooks       deliver saved mocks instead of waiting for real callbacks
+  --no-history          do not append this run to history/
   --inbox-port <n>      port the webhook inbox listens on (default 5179)
   --include-bodies      keep response bodies for failures in the JSON report
   --quiet               only print the verdict
@@ -202,7 +207,7 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
 
     const runs = await runJourneyCases(journey, {
       env,
-      lookup,
+      lookup: withMaterialised(lookup),
       transport,
       baseline: recorded?.nodes,
       inbox: {
@@ -219,11 +224,29 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
 
     for (const run of runs) {
       reports.push(
-        buildJourneyReport(journey, run.result.states, run.result.context, lookup, {
+        buildJourneyReport(journey, run.result.states, run.result.context, withMaterialised(lookup), {
           includeBodies: options.includeBodies,
           caseName: run.case?.name,
         }),
       );
+    }
+
+    if (!options.noHistory) {
+      const forThis = buildReport(env, reports.slice(-runs.length), {
+        startedAt,
+        durationMs: Date.now() - started,
+        baseUrl: environment.baseUrl,
+      });
+      await recordHistory(root, summary.file, forThis);
+
+      // The most useful line after a failure is when it started, and history is
+      // the only thing that knows.
+      if (!options.quiet) {
+        const trends = trendsFrom(await loadHistory(root, summary.file));
+        for (const trend of trends.filter((t) => t.failingSince && t.runs > 1)) {
+          process.stdout.write(`  ⌛ ${describeTrend(trend)}\n`);
+        }
+      }
     }
 
     if (options.updateSnapshots) {
@@ -267,8 +290,9 @@ async function runIn(env: string, options: Options, root: string) {
     resetRegistry();
     register(BUILTINS);
     register(saved.defs);
-    const result = await runJourney(saved.journey, {env, lookup, transport});
-    out.push({journey: saved.journey, states: result.states, lookup});
+    const materialised = withMaterialised(lookup);
+    const result = await runJourney(saved.journey, {env, lookup: materialised, transport});
+    out.push({journey: saved.journey, states: result.states, lookup: materialised});
   }
   return out;
 }
