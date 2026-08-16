@@ -8,6 +8,7 @@ import {create} from 'zustand';
 import {runJourneyCases, shapesFrom, type Transport} from '../core/engine';
 import {materialise} from '../core/builtins';
 import {topoOrder} from '../core/graph';
+import {resolve} from '../core/template';
 import {allDefs, lookup as registryLookup, register, registerPack, removePack, allPacks, type Pack} from '../core/registry';
 import {importDocument} from '../core/import';
 import {applyOps, buildChain, type AppliedChange} from '../core/ai/apply';
@@ -17,6 +18,7 @@ import {requestExplanation, requestPlan, requestRevision, type Explanation} from
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
+import type {HookMatch, HookMock, InboxSource, ReceivedHook} from '../core/inbox';
 import {fileNameFor, packJourney, readSaved, type SavedJourney} from '../core/persist';
 import type {
   HttpResponse,
@@ -27,6 +29,7 @@ import type {
   NodeDef,
   NodeState,
   ResolvedRequest,
+  RunContext,
 } from '../core/types';
 
 /** Public config, fetched once at boot. Values never leave the server. */
@@ -47,7 +50,7 @@ export interface AiTurn {
   problems: string[];
 }
 
-export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved' | 'data';
+export type Rail = 'inspector' | 'ai' | 'explain' | 'packs' | 'report' | 'saved' | 'data' | 'inbox';
 
 export interface SavedSummary {
   name: string;
@@ -82,6 +85,16 @@ interface StudioState {
   /** Recorded response shapes this journey is being compared against. */
   baseline: Record<string, Shape> | null;
   recordedAt: string | null;
+  /** The live run's context, so a mock fired mid-run can carry its values. */
+  context: RunContext | null;
+
+  /** Deliveries the inbox has seen, and the URL a provider should call. */
+  hooks: ReceivedHook[];
+  inboxUrl: string;
+  mocks: HookMock[];
+  /** Deliver saved payloads instead of waiting for the real integration. */
+  useMocks: boolean;
+
   /** Where an opened journey's definitions came from, kept so re-saving it does
    *  not throw the provenance away in a session that imported nothing. */
   sources: SavedJourney['sources'];
@@ -117,6 +130,13 @@ interface StudioState {
   setBudget(id: string, budgetMs: number | undefined): void;
   recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
 
+  refreshInbox(): Promise<void>;
+  clearInbox(): Promise<void>;
+  setUseMocks(useMocks: boolean): void;
+  saveMockFrom(hook: ReceivedHook, name: string): Promise<void>;
+  fireMock(name: string): Promise<void>;
+  deleteMock(name: string): Promise<void>;
+
   refreshSaved(): Promise<void>;
   saveJourney(name: string, description?: string): Promise<void>;
   openJourney(file: string): Promise<string[]>;
@@ -142,6 +162,31 @@ const transport: Transport = {
     const payload = await res.json();
     if (!res.ok) throw new Error(payload?.error ?? `proxy returned ${res.status}`);
     return payload as HttpResponse;
+  },
+};
+
+/**
+ * The browser asks the server to claim a delivery, rather than fetching the list
+ * and picking one itself: claiming has to be atomic, or two waiting steps race
+ * for the same webhook.
+ */
+const inboxSource: InboxSource = {
+  async claim(match: HookMatch, opts: {since: string; by: string}) {
+    const res = await fetch('/api/inbox/claim', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({match, ...opts}),
+    });
+    return res.ok ? ((await res.json()) as ReceivedHook) : undefined;
+  },
+  async describeUnmatched(since: string) {
+    const res = await fetch('/api/inbox/claim', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({match: {path: '\u0000never'}, since, by: 'describe'}),
+    });
+    if (res.ok) return [];
+    return ((await res.json()) as {unmatched?: string[]}).unmatched ?? [];
   },
 };
 
@@ -215,6 +260,11 @@ export const useStudio = create<StudioState>((set, get) => {
   baseline: null,
   recordedAt: null,
   sources: undefined,
+  context: null,
+  hooks: [],
+  inboxUrl: '',
+  mocks: [],
+  useMocks: false,
 
   async init() {
     try {
@@ -225,6 +275,7 @@ export const useStudio = create<StudioState>((set, get) => {
         slackConfigured: Boolean(config.slackConfigured),
       });
       await get().refreshSaved();
+      await get().refreshInbox();
     } catch {
       set({logs: [...get().logs, '! Could not reach the API. Is the dev server running?']});
     }
@@ -335,10 +386,21 @@ export const useStudio = create<StudioState>((set, get) => {
       startAt,
       priorResponses,
       baseline: get().baseline ?? undefined,
+      inbox: inboxSource,
+      // Only when explicitly switched on. A journey that quietly satisfies its
+      // webhook from a canned payload is a test that passes while the
+      // integration is broken.
+      ...(get().useMocks
+        ? {mocks: Object.fromEntries(get().mocks.map((m) => [m.name, m]))}
+        : {}),
       signal: abort.signal,
       hooks: {
         onNodeStart: (id) => set({states: {...get().states, [id]: {status: 'running'}}}),
         onNodeEnd: (id, state) => set({states: {...get().states, [id]: state}}),
+        // Kept so "Fire now" can resolve a mock against the run that is waiting
+        // for it — a payload carrying a literal {{vars.paymentRef}} would never
+        // correlate, which makes the button look broken.
+        onContext: (context) => set({context}),
         onLog: (line) => set({logs: [...get().logs, line]}),
       },
     });
@@ -463,6 +525,60 @@ export const useStudio = create<StudioState>((set, get) => {
     });
     await get().refreshSaved();
     return {ok: true, nodes: payload.nodes};
+  },
+
+  // ---- the webhook inbox ----
+
+  async refreshInbox() {
+    try {
+      const [inbox, mocks] = await Promise.all([
+        (await fetch('/api/inbox')).json() as Promise<{hooks: ReceivedHook[]; url: string}>,
+        (await fetch('/api/mocks')).json() as Promise<HookMock[]>,
+      ]);
+      set({hooks: inbox.hooks, inboxUrl: inbox.url, mocks});
+    } catch {
+      /* the inbox is a panel; failing to load it should not break the app */
+    }
+  },
+
+  async clearInbox() {
+    await fetch('/api/inbox', {method: 'DELETE'});
+    await get().refreshInbox();
+  },
+
+  setUseMocks: (useMocks) => set({useMocks}),
+
+  async saveMockFrom(hook, name) {
+    const {mockFromHook} = await import('../core/inbox');
+    const mock = mockFromHook(hook, name);
+    await fetch(`/api/mocks/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(mock),
+    });
+    set({logs: [...get().logs, `saved webhook "${name}" as a mock`]});
+    await get().refreshInbox();
+  },
+
+  async fireMock(name) {
+    const {context, mocks} = get();
+    const mock = mocks.find((m) => m.name === name);
+    // Resolved against the waiting run, so a mock body that references
+    // {{vars.paymentRef}} arrives carrying the reference this run generated.
+    const body = mock && context ? resolve(mock.body, context) : undefined;
+
+    await fetch(`/api/mocks/${encodeURIComponent(name)}/fire`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body === undefined ? {} : {body}),
+    });
+    set({logs: [...get().logs, `fired mock "${name}" into the inbox`]});
+    await get().refreshInbox();
+  },
+
+  async deleteMock(name) {
+    await fetch(`/api/mocks/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    await get().refreshInbox();
   },
 
   // ---- saved journeys ----

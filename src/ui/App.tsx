@@ -6,7 +6,7 @@ import {Canvas} from './Canvas';
 import {Palette} from './Palette';
 import {Inspector} from './Inspector';
 import {AiPanel} from './AiPanel';
-import {CasesPanel, ExplainPanel, PacksPanel, ReportPanel, SavedPanel} from './Panels';
+import {CasesPanel, ExplainPanel, InboxPanel, PacksPanel, ReportPanel, SavedPanel} from './Panels';
 import {ImportDialog} from './ImportDialog';
 
 register(BUILTINS);
@@ -19,6 +19,7 @@ const RAIL_TITLE: Record<Rail, string> = {
   report: '▦ QA report',
   saved: 'Saved journeys',
   data: '▤ Cases',
+  inbox: '⇣ Webhook inbox',
 };
 
 function Logs() {
@@ -93,6 +94,7 @@ function Topbar({onImport}: {onImport: () => void}) {
         <button className="tool" aria-pressed={rail === 'explain'} onClick={() => toggle('explain')}>Explain</button>
         <button className="tool" aria-pressed={rail === 'data'} onClick={() => toggle('data')}>Cases</button>
         <button className="tool" aria-pressed={rail === 'saved'} onClick={() => toggle('saved')}>Journeys</button>
+        <button className="tool" aria-pressed={rail === 'inbox'} onClick={() => toggle('inbox')}>Inbox</button>
         <button className="tool" aria-pressed={rail === 'report'} onClick={() => toggle('report')}>Report</button>
         {running ? (
           <button className="tool stop" onClick={stop}>■ Stop</button>
@@ -155,6 +157,7 @@ export default function App() {
           {rail === 'report' && <ReportPanel />}
           {rail === 'saved' && <SavedPanel />}
           {rail === 'data' && <CasesPanel />}
+          {rail === 'inbox' && <InboxPanel />}
         </aside>
       </div>
       {importing && <ImportDialog onClose={() => setImporting(false)} />}

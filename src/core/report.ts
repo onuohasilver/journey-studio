@@ -31,6 +31,8 @@ export interface StepReport {
   overBudget?: {budgetMs: number; actualMs: number};
   /** True for a cleanup step, which runs after the journey either way. */
   teardown?: boolean;
+  /** The webhook this step waited for came from a saved mock, not the real thing. */
+  mocked?: boolean;
   /** Only for a failed step: what was sent, so the failure is reproducible. */
   request?: {method: string; url: string};
   /** Only when explicitly asked for — bodies routinely hold PII and tokens. */
@@ -50,6 +52,8 @@ export interface JourneyReport {
   shapeBreaks: number;
   /** Cleanup steps that failed — data this run could not take back. */
   leaked: string[];
+  /** Steps whose webhook was mocked rather than delivered by the integration. */
+  mocked: number;
 }
 
 export interface QaReport {
@@ -66,6 +70,7 @@ export interface QaReport {
     contractBreaks: number;
     shapeBreaks: number;
     leaked: number;
+    mocked: number;
   };
   journeys: JourneyReport[];
   /** Steps whose outcome varied across repeats. Populated by `findFlakes`. */
@@ -142,6 +147,7 @@ export function buildJourneyReport(
       ...(node.budgetMs ? {budgetMs: node.budgetMs} : {}),
       ...(state.overBudget ? {overBudget: state.overBudget} : {}),
       ...(state.teardown ? {teardown: true} : {}),
+      ...(state.mocked ? {mocked: true} : {}),
       ...(state.status === 'failed' && state.sent
         ? {request: {method: state.sent.method, url: state.sent.url}}
         : {}),
@@ -182,6 +188,7 @@ export function buildJourneyReport(
     contractBreaks,
     shapeBreaks,
     leaked: steps.filter((s) => s.teardown && s.status === 'failed').map((s) => s.label),
+    mocked: steps.filter((s) => s.mocked).length,
   };
 }
 
@@ -210,6 +217,7 @@ export function buildReport(
       contractBreaks: journeys.reduce((n, j) => n + j.contractBreaks, 0),
       shapeBreaks: journeys.reduce((n, j) => n + j.shapeBreaks, 0),
       leaked: journeys.reduce((n, j) => n + j.leaked.length, 0),
+      mocked: journeys.reduce((n, j) => n + j.mocked, 0),
     },
     journeys,
   };
@@ -321,6 +329,12 @@ export function summariseText(report: QaReport): string {
   );
   const drifted = summariseDrift(totals);
   if (drifted) lines.push(drifted);
+  // Said plainly and near the verdict: a green run where the callbacks were
+  // canned has not tested the integration, and the report must never let that
+  // read as though it had.
+  if (totals.mocked) {
+    lines.push(`${totals.mocked} webhook${totals.mocked === 1 ? '' : 's'} delivered from mocks, not the real integration`);
+  }
 
   for (const journey of report.journeys) {
     lines.push('');
@@ -336,7 +350,8 @@ export function summariseText(report: QaReport): string {
         .filter(Boolean)
         .join(', ');
       lines.push(
-        `${mark} ${step.teardown ? '⌫ ' : ''}${step.label}${step.httpStatus ? ` · ${step.httpStatus}` : ''}` +
+        `${mark} ${step.teardown ? '⌫ ' : ''}${step.label}${step.mocked ? ' (mocked)' : ''}` +
+          `${step.httpStatus ? ` · ${step.httpStatus}` : ''}` +
           `${timing}${drift ? ` — ${drift}` : ''}`,
       );
       if (step.error) lines.push(`      ${step.error}`);

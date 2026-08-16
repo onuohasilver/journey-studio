@@ -13,12 +13,14 @@
 //   journey run --slack                  post the result
 //   journey run -u                       record what the responses look like now
 //   journey run --strict                 fail on drift, not just on assertions
+//   journey run --mock-webhooks          deliver saved payloads instead of waiting
 //   journey compare --env staging --with prod   the same journey, both sides
 //
 // Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
 
 import {readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import express from 'express';
 import {runJourney, runJourneyCases, shapesFrom, type Transport} from '../src/core/engine';
 import {register, lookup, resetRegistry} from '../src/core/registry';
 import {BUILTINS} from '../src/core/builtins';
@@ -38,6 +40,7 @@ import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from '../server/config';
 import {sendRequest} from '../server/proxy';
 import {listJourneys, loadJourney, loadSnapshot, saveSnapshot} from '../server/journeys';
+import {createInboxRouter, inbox, loadMocks} from '../server/inbox';
 import type {Journey, NodeState, ResolvedRequest} from '../src/core/types';
 
 interface Options {
@@ -51,6 +54,8 @@ interface Options {
   strictSnapshot: boolean;
   strictBudget: boolean;
   updateSnapshots: boolean;
+  mockWebhooks: boolean;
+  inboxPort: number;
   with?: string;
   includeBodies: boolean;
   quiet: boolean;
@@ -65,6 +70,8 @@ function parseArgs(argv: string[]): Options {
     strictSnapshot: false,
     strictBudget: false,
     updateSnapshots: false,
+    mockWebhooks: false,
+    inboxPort: Number(process.env.INBOX_PORT) || 5179,
     includeBodies: false,
     quiet: false,
   };
@@ -80,6 +87,8 @@ function parseArgs(argv: string[]): Options {
       case '--strict-snapshot': options.strictSnapshot = true; break;
       case '--strict-budget': options.strictBudget = true; break;
       case '--with': options.with = argv[++i]; break;
+      case '--mock-webhooks': options.mockWebhooks = true; break;
+      case '--inbox-port': options.inboxPort = Number(argv[++i]) || 5179; break;
       // One flag for "any drift is a failure", because that is the thing people
       // actually want and nobody remembers three flags for it.
       case '--strict':
@@ -111,6 +120,8 @@ const USAGE = `journey run [names…] [options]
   --strict-contract     fail only on a response that stopped matching the spec
   --strict-snapshot     fail only on a response whose shape moved
   --strict-budget       fail only on a step slower than its declared budget
+  --mock-webhooks       deliver saved mocks instead of waiting for real callbacks
+  --inbox-port <n>      port the webhook inbox listens on (default 5179)
   --include-bodies      keep response bodies for failures in the JSON report
   --quiet               only print the verdict
 
@@ -194,6 +205,11 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       lookup,
       transport,
       baseline: recorded?.nodes,
+      inbox: {
+        async claim(match, claimOpts) { return inbox.claim(match, claimOpts); },
+        async describeUnmatched(since) { return inbox.describeUnmatched(since); },
+      },
+      ...(options.mockWebhooks ? {mocks: await loadMocks(root)} : {}),
       strictContract: options.strictContract,
       // Recording and comparing at once would make every run agree with itself.
       strictSnapshot: options.strictSnapshot && !options.updateSnapshots,
@@ -293,6 +309,24 @@ async function compare(options: Options, root: string): Promise<number> {
   return differing ? 1 : 0;
 }
 
+/**
+ * Whether any journey about to run waits for a webhook.
+ *
+ * Checked so the CLI only opens a port when it has to — a test runner that
+ * silently starts listening on every invocation is a surprise nobody wants in
+ * CI, and the node type is enough to know without resolving definitions.
+ */
+async function awaitsWebhook(options: Options, root: string): Promise<boolean> {
+  for (const summary of await listJourneys(root)) {
+    if (options.names.length && !options.names.some((n) => summary.name === n || summary.file === n || summary.file === `${n}.journey.json`)) {
+      continue;
+    }
+    const saved = await loadJourney(root, summary.file);
+    if (saved?.journey.nodes.some((node) => node.type === 'control.webhook')) return true;
+  }
+  return false;
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === 'help' || command === '--help') {
@@ -308,6 +342,32 @@ async function main(): Promise<number> {
   const root = process.cwd();
 
   if (command === 'compare') return compare(options, root);
+
+  // A journey that waits for a callback needs somewhere for it to land. Opened
+  // only when one actually waits, and only when the run is not using mocks.
+  let listening: {close(cb: () => void): void} | undefined;
+  if (!options.mockWebhooks && (await awaitsWebhook(options, root))) {
+    const app = express();
+    app.use('/api', createInboxRouter(root));
+    listening = await new Promise((resolve) => {
+      const server = app.listen(options.inboxPort, () => resolve(server));
+    });
+    if (!options.quiet) {
+      process.stdout.write(
+        `webhook inbox on http://localhost:${options.inboxPort}/api/hooks/ ` +
+          `(use --mock-webhooks to replay saved payloads instead)\n`,
+      );
+    }
+  }
+
+  try {
+    return await runAll(options, root);
+  } finally {
+    if (listening) await new Promise<void>((resolve) => listening!.close(() => resolve()));
+  }
+}
+
+async function runAll(options: Options, root: string): Promise<number> {
 
   const attempts: QaReport[] = [];
   for (let i = 0; i < options.repeat; i++) {

@@ -4,10 +4,14 @@ import express, {type Express} from 'express';
 import {createAiRouter} from './ai';
 import {createApiRouter} from './proxy';
 import {createJourneyRouter} from './journeys';
+import {createInboxRouter} from './inbox';
 
 export function createApi(root = process.cwd()): Express {
   const app = express();
   app.use('/api/ai', createAiRouter());
+  // Before the JSON-parsing routers: a delivery may arrive as anything, and the
+  // inbox reads the raw body itself.
+  app.use('/api', createInboxRouter(root));
   app.use('/api', createJourneyRouter(root));
   app.use('/api', createApiRouter(root));
   return app;

@@ -168,6 +168,7 @@ describe('timing budgets', () => {
           contractBreaks: 0,
           shapeBreaks: 0,
           leaked: [],
+          mocked: 0,
           steps: durations.map((durationMs) => ({
             id: 's1',
             label: 'Slow step',
@@ -202,6 +203,7 @@ describe('timing budgets', () => {
         contractBreaks: 0,
         shapeBreaks: 0,
         leaked: [],
+        mocked: 0,
         steps: [{id: 's1', label: 'x', type: 't', status: 'passed', durationMs: 9000, failedAssertions: [], contract: [], shapeChanges: []}],
       },
     ], {startedAt: 'x', durationMs: 1});

@@ -75,7 +75,55 @@ export const DELAY: NodeDef = {
   gives: [],
 };
 
-export const BUILTINS: NodeDef[] = [HTTP_REQUEST, SET_VALUES, ASSERT, DELAY];
+export const AWAIT_WEBHOOK: NodeDef = {
+  type: 'control.webhook',
+  label: 'Wait for webhook',
+  summary: 'Block until a callback arrives at the studio inbox.',
+  group: 'Building blocks',
+  control: 'await',
+  givesFrom: 'capture',
+  fields: [
+    {
+      key: 'path',
+      label: 'Inbox path',
+      kind: 'text',
+      placeholder: 'payments',
+      help: 'Point the provider at /api/hooks/<this>. Blank listens on every path.',
+    },
+    {
+      key: 'correlateOn',
+      label: 'Correlate on',
+      kind: 'text',
+      placeholder: 'body.reference',
+      help: 'Where the payload carries the value that ties it to this run. Without one, any delivery on the path will do — which is wrong the moment two runs overlap.',
+    },
+    {
+      key: 'equals',
+      label: 'Must equal',
+      kind: 'text',
+      placeholder: '{{vars.paymentRef}}',
+      help: 'Usually a value an earlier step produced.',
+    },
+    {
+      key: 'capture',
+      label: 'Capture',
+      kind: 'json',
+      help: 'Context values to take from the delivery, e.g. {"status": "body.status"}.',
+    },
+    {key: 'timeoutMs', label: 'Give up after (ms)', kind: 'number'},
+    {
+      key: 'mock',
+      label: 'Mock to use',
+      kind: 'text',
+      help: 'Saved payload delivered instead of waiting, but only when the run asks for mocks. Never a fallback.',
+    },
+  ],
+  defaults: {path: '', correlateOn: '', equals: '', capture: {}, timeoutMs: 30000, mock: ''},
+  needs: [],
+  gives: [],
+};
+
+export const BUILTINS: NodeDef[] = [HTTP_REQUEST, SET_VALUES, ASSERT, DELAY, AWAIT_WEBHOOK];
 
 /**
  * The raw HTTP node is the one definition whose request is not fixed: its

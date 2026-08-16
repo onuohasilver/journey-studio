@@ -1,0 +1,10 @@
+{
+  "name": "settled",
+  "path": "payments",
+  "method": "POST",
+  "body": {
+    "reference": "{{vars.paymentRef}}",
+    "status": "settled",
+    "amount": 4200
+  }
+}

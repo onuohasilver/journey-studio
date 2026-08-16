@@ -81,6 +81,17 @@ export function formatReport(report: QaReport, meta: {title?: string; link?: str
     );
   }
 
+  // Never let a channel read a green run as proof the integration works when the
+  // callbacks were canned.
+  if (totals.mocked) {
+    blocks.push(
+      section(
+        `:test_tube: *${totals.mocked} webhook${totals.mocked === 1 ? '' : 's'} delivered from mocks*, ` +
+          `not the real integration.`,
+      ),
+    );
+  }
+
   const failures = report.journeys.filter((j) => j.status === 'failed');
   if (failures.length) {
     blocks.push({type: 'divider'});

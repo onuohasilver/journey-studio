@@ -86,6 +86,7 @@ npx journey run --report qa.json      # write the evidence
 npx journey run --slack               # post the result
 npx journey run -u                    # record what the responses look like now
 npx journey run --strict              # fail on drift, not just on assertions
+npx journey run --mock-webhooks       # replay saved callbacks instead of waiting
 npx journey compare --env a --with b  # the same journey against two environments
 ```
 
@@ -156,6 +157,74 @@ suite becomes something people delete.
 Snapshots live in `snapshots/`, one file per journey, meant to be committed. A shape change arriving
 as a diff in a pull request is the point: it turns "the API changed under us" from something found in
 production into a line somebody approved.
+
+### Waiting for a webhook
+
+Plenty of the flows worth testing do not finish when the response does. You POST a payment, get a
+202, and the thing you care about turns up later as a callback. A tool that can only make outbound
+requests cannot test that — it can only sleep and poll and hope.
+
+So the studio runs an inbox. Anything sent to `/api/hooks/<path>` is recorded and answered 200, and a
+**Wait for webhook** step blocks until one arrives that belongs to it:
+
+```
+path          payments
+correlate on  body.reference
+must equal    {{vars.paymentRef}}
+capture       {"settlementStatus": "body.status"}
+```
+
+Correlation is what makes this usable for more than a demo. With a dozen cases in flight, "the next
+delivery on /payments" is the wrong one most of the time; matching on a value the run itself produced
+is the only way each row claims its own callback. A delivery is handed to one claimant only.
+
+The whole thing rests on one decision: **a received webhook is just an `HttpResponse`.** Stored that
+way, everything already in the tool works on it unchanged — `{{nodes.n5.body.status}}`, `gives`,
+assertions, contract checking, snapshots. None of them needed a line of webhook-specific code.
+
+Two details that took a bug to find. Deliveries that arrived *before* the step started waiting still
+count, because the race goes the unhelpful way in practice — a fast provider calls back before the
+journey reaches the step — and watching only for new arrivals fails on exactly the integrations that
+work best. And anything older than the run is ignored, so a run cannot go green by claiming last
+night's callback.
+
+When nothing arrives, the message tells you which problem you have:
+
+```
+Waited 5s for a webhook on "payments" where body.reference = "pay_demo" and none arrived.
+1 other delivery did: POST /payments {"reference":"pay_SOMEONE_ELSE","status":"settled"}
+```
+
+"It called with a reference you are not matching on" and "it never called" need different fixes.
+
+### Mocking the callback
+
+Save a delivery you received and it becomes replayable. Two jobs: while building a journey it saves
+you triggering a real payment to see what the callback looks like, and in CI it is the only way the
+journey can run at all — no provider is going to call a build agent.
+
+```bash
+npx journey run --mock-webhooks     # deliver saved payloads instead of waiting
+```
+
+A mock body may use `{{templates}}`, so it echoes back the reference *this* run generated rather than
+a hard-coded one. Firing one from the studio resolves it against the run that is currently waiting.
+
+**A mock is never a fallback.** A journey that quietly satisfies its webhook from a canned payload
+whenever the real one fails to arrive is a test that passes while the integration is broken, which is
+worse than no test. So mock delivery is asked for explicitly, and every step it fulfils is marked:
+
+```
+✓ Wait for settlement (mocked) · 200 (1ms)
+1 webhook delivered from mocks, not the real integration
+```
+
+That line is in the terminal, the report, and the Slack message. It also fires for a mock you fired
+by hand mid-run — the step really did wait, but the payload was still canned, and a green run must
+never read as proof the integration works.
+
+Locally the inbox has to be reachable from wherever the provider runs, which means a tunnel; the
+panel shows the URL it believes it is on, taking the forwarded host over anything configured.
 
 ### Cleaning up after yourself
 
@@ -279,7 +348,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 204 tests, no network
+npm test        # 226 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -307,7 +376,7 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Clean-up steps that run whether the journey passed or failed
 - [x] Timing budgets, judged at p95 across runs and cases
 - [x] Environment comparison — the same journey against two, diffed
-- [ ] Webhook inbox for async steps
+- [x] Webhook inbox for async steps, with correlation and replayable mocks
 - [ ] Scheduled runs with a history, so drift has a timeline
 - [ ] Assertion editor in the inspector
 

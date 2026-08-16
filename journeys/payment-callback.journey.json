@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "name": "Payment callback",
+  "description": "Starts a payment, then waits for the provider to call back about it.",
+  "savedAt": "2026-08-16T00:00:00.000Z",
+  "env": "local",
+  "journey": {
+    "name": "Payment callback",
+    "nodes": [
+      {
+        "id": "s1",
+        "type": "control.set",
+        "label": "Start a payment",
+        "position": {
+          "x": 120,
+          "y": 170
+        },
+        "config": {
+          "values": {
+            "paymentRef": "pay_{{$uuid}}"
+          }
+        }
+      },
+      {
+        "id": "s2",
+        "type": "control.webhook",
+        "label": "Wait for settlement",
+        "position": {
+          "x": 430,
+          "y": 170
+        },
+        "config": {
+          "path": "payments",
+          "correlateOn": "body.reference",
+          "equals": "{{vars.paymentRef}}",
+          "capture": {
+            "settlementStatus": "body.status"
+          },
+          "timeoutMs": 15000,
+          "mock": "settled"
+        }
+      },
+      {
+        "id": "s3",
+        "type": "control.assert",
+        "label": "It settled",
+        "position": {
+          "x": 740,
+          "y": 170
+        },
+        "config": {
+          "nodeRef": "s2",
+          "assertions": [
+            {
+              "path": "body.status",
+              "op": "eq",
+              "expected": "settled"
+            }
+          ]
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "s1",
+        "target": "s2"
+      },
+      {
+        "id": "e2",
+        "source": "s2",
+        "target": "s3"
+      }
+    ]
+  },
+  "defs": []
+}

@@ -87,6 +87,7 @@ export type ControlKind =
   | 'set'        // write literal/templated values into the context
   | 'assert'     // assert against an earlier node's response
   | 'delay'      // wait
+  | 'await'      // block until a matching webhook arrives at the inbox
   | 'script';    // reserved
 
 /**
@@ -175,6 +176,12 @@ export interface NodeState {
   overBudget?: {budgetMs: number; actualMs: number};
   /** Marks a state produced by a cleanup step rather than the journey proper. */
   teardown?: boolean;
+  /**
+   * The webhook this step waited for was delivered from a saved mock rather than
+   * by the real integration. Carried all the way to the report so nobody mistakes
+   * a mocked run for a real one.
+   */
+  mocked?: boolean;
 }
 
 export interface ResolvedRequest {

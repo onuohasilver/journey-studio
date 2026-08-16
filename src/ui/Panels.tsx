@@ -109,6 +109,122 @@ export function PacksPanel({onImport}: {onImport: () => void}) {
   );
 }
 
+/**
+ * Deliveries the inbox has seen, and the saved payloads that stand in for them.
+ *
+ * The panel exists mostly to answer one question fast — "did it actually call
+ * us?" — because the alternative is reading someone else's delivery logs.
+ */
+export function InboxPanel() {
+  const hooks = useStudio((s) => s.hooks);
+  const inboxUrl = useStudio((s) => s.inboxUrl);
+  const mocks = useStudio((s) => s.mocks);
+  const useMocks = useStudio((s) => s.useMocks);
+  const setUseMocks = useStudio((s) => s.setUseMocks);
+  const refreshInbox = useStudio((s) => s.refreshInbox);
+  const clearInbox = useStudio((s) => s.clearInbox);
+  const saveMockFrom = useStudio((s) => s.saveMockFrom);
+  const fireMock = useStudio((s) => s.fireMock);
+  const deleteMock = useStudio((s) => s.deleteMock);
+  const [open, setOpen] = useState<string | null>(null);
+
+  return (
+    <div className="rail-body">
+      <div className="field">
+        <label>Point the provider here</label>
+        <input readOnly value={`${inboxUrl}<path>`} onFocus={(e) => e.currentTarget.select()} />
+        <span className="help">
+          Anything sent here is recorded and answered 200. It has to be reachable from wherever the
+          provider runs, so locally that means a tunnel.
+        </span>
+      </div>
+
+      <label className="check">
+        <input type="checkbox" checked={useMocks} onChange={(e) => setUseMocks(e.target.checked)} />
+        <span>
+          Deliver from mocks instead of waiting
+          <span className="help">
+            Off, a waiting step blocks until the real callback arrives and fails honestly if it does not.
+            Mocks are never a fallback — a run that quietly accepts a canned payload passes while the
+            integration is broken. Mocked steps are marked as such in the report.
+          </span>
+        </span>
+      </label>
+
+      <span className="caps">Received {hooks.length ? `· ${hooks.length}` : ''}</span>
+      {hooks.length === 0 && <p className="help">Nothing yet.</p>}
+      {hooks.map((hook) => (
+        <div className="pack" key={hook.id}>
+          <div className="nm">
+            {hook.method} /{hook.path || '(root)'}
+            {hook.claimedBy ? <span className="ty"> · claimed by {hook.claimedBy}</span> : null}
+          </div>
+          <div className="sub">{hook.at.slice(11, 19)}</div>
+          <div className="btn-row" style={{marginTop: 8}}>
+            <button
+              className="btn"
+              style={{fontSize: 11}}
+              onClick={() => setOpen(open === hook.id ? null : hook.id)}
+            >
+              {open === hook.id ? 'Hide' : 'Payload'}
+            </button>
+            <button
+              className="btn"
+              style={{fontSize: 11}}
+              onClick={() => {
+                const name = window.prompt('Save this delivery as a mock called…', hook.path || 'webhook');
+                if (name) void saveMockFrom(hook, name);
+              }}
+            >
+              Save as mock
+            </button>
+          </div>
+          {open === hook.id && (
+            <pre
+              style={{
+                margin: '8px 0 0', background: 'var(--surface-0)', border: '1px solid var(--line)',
+                borderRadius: 8, padding: 10, fontSize: 11, overflowX: 'auto', maxHeight: 220,
+                fontFamily: 'var(--mono)',
+              }}
+            >
+              {JSON.stringify(hook.body, null, 2)}
+            </pre>
+          )}
+        </div>
+      ))}
+
+      <span className="caps">Mocks</span>
+      {mocks.length === 0 && (
+        <p className="help">
+          Save a delivery you received and it becomes replayable — which is the only way a journey that
+          waits for a webhook can run in CI, where no provider is going to call a build agent.
+        </p>
+      )}
+      {mocks.map((mock) => (
+        <div className="pack" key={mock.name}>
+          <div className="nm">{mock.name}</div>
+          <div className="sub">{mock.method ?? 'POST'} /{mock.path || '(root)'}</div>
+          <div className="btn-row" style={{marginTop: 8}}>
+            <button className="btn go" style={{fontSize: 11}} onClick={() => void fireMock(mock.name)}>
+              Fire now
+            </button>
+            <button className="btn danger" style={{fontSize: 11}} onClick={() => void deleteMock(mock.name)}>
+              Delete
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <div className="btn-row">
+        <button className="btn" onClick={() => void refreshInbox()}>Refresh</button>
+        <button className="btn danger" disabled={!hooks.length} onClick={() => void clearInbox()}>
+          Clear inbox
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** The QA report for the last run — the thing you take away, export, or post. */
 export function ReportPanel() {
   const report = useStudio((s) => s.report);

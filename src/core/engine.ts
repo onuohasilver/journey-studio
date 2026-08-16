@@ -9,6 +9,14 @@
 import {runAssertions, describeFailure} from './assert';
 import {checkContract, summariseContract, type ContractOptions} from './contract';
 import {diffShape, shapeOf, summariseShape, type Shape} from './snapshot';
+import {
+  asResponse,
+  readHook,
+  type HookMatch,
+  type HookMock,
+  type InboxSource,
+  type ReceivedHook,
+} from './inbox';
 import {downstreamOf, topoOrder} from './graph';
 import {readResponse, resolve} from './template';
 import type {
@@ -61,6 +69,16 @@ export interface RunOptions {
   strictBudget?: boolean;
   /** Context values to start with — one row of a data-driven run. */
   seed?: Record<string, unknown>;
+  /** Where "wait for a webhook" steps look for their delivery. */
+  inbox?: InboxSource;
+  /**
+   * Saved payloads to deliver instead of waiting for the real integration.
+   *
+   * Present only when the run explicitly asked for it. Never a fallback for a
+   * webhook that failed to arrive — that would be a test that passes while the
+   * integration is broken.
+   */
+  mocks?: Record<string, HookMock>;
 }
 
 export interface RunResult {
@@ -185,6 +203,120 @@ async function runControl(
   }
 }
 
+/** How often the inbox is asked. Small enough to feel instant, large enough not to spin. */
+const POLL_MS = 250;
+
+/** Stamped by the studio on a delivery someone fired by hand. */
+export const MOCK_HEADER = 'x-journey-studio-mock';
+
+interface AwaitOutcome {
+  ok: boolean;
+  hook?: ReceivedHook;
+  mocked?: boolean;
+  error?: string;
+  captured: Record<string, unknown>;
+}
+
+/**
+ * Block until a webhook belonging to this step arrives.
+ *
+ * The correlation config is what makes this usable for more than a demo: with a
+ * dozen cases in flight, "the next delivery on /payments" is the wrong one most
+ * of the time. Matching on a value the run itself produced is the only way each
+ * row claims its own callback.
+ */
+async function awaitHook(
+  def: NodeDef,
+  node: JourneyNode,
+  ctx: RunContext,
+  opts: RunOptions,
+  since: string,
+): Promise<AwaitOutcome> {
+  const cfg = resolve(settings(def, node), ctx) as Record<string, unknown>;
+  const match: HookMatch = {
+    path: cfg.path ? String(cfg.path) : undefined,
+    correlateOn: cfg.correlateOn ? String(cfg.correlateOn) : undefined,
+    equals: cfg.equals,
+  };
+  const capture = (cfg.capture ?? {}) as Record<string, string>;
+  const timeoutMs = Number(cfg.timeoutMs ?? 30_000);
+
+  const take = (hook: ReceivedHook, mocked: boolean): AwaitOutcome => {
+    const captured: Record<string, unknown> = {};
+    for (const [key, from] of Object.entries(capture)) {
+      const value = readHook(hook, from);
+      if (value !== undefined) captured[key] = value;
+    }
+    // A delivery fired by hand from the studio is stamped on the way in. The
+    // step really did wait for it, but the payload was still canned, and a green
+    // run must never read as proof the integration works when it does not.
+    const byHand = Boolean(hook.headers?.[MOCK_HEADER]);
+    return {ok: true, hook, mocked: mocked || byHand, captured};
+  };
+
+  // Mocked delivery is a separate path rather than a fallback, so a mocked run
+  // can never be mistaken for one where the integration actually fired.
+  if (opts.mocks) {
+    const wanted = cfg.mock ? String(cfg.mock) : undefined;
+    const mock =
+      (wanted && opts.mocks[wanted]) ??
+      Object.values(opts.mocks).find((m) => !match.path || m.path === match.path);
+    if (!mock) {
+      return {
+        ok: false,
+        captured: {},
+        error: wanted
+          ? `No saved webhook called "${wanted}". Record one from the inbox first.`
+          : `No saved webhook for path "${match.path ?? '(any)'}".`,
+      };
+    }
+    if (mock.delayMs) await new Promise((r) => setTimeout(r, mock.delayMs));
+    // The body is resolved against the context, so a mock can echo back the
+    // reference this run generated rather than a hard-coded one.
+    return take(
+      {
+        id: `mock_${mock.name}`,
+        at: new Date().toISOString(),
+        method: mock.method ?? 'POST',
+        path: mock.path,
+        headers: mock.headers ?? {},
+        query: {},
+        body: resolve(mock.body, ctx),
+      },
+      true,
+    );
+  }
+
+  if (!opts.inbox) {
+    return {ok: false, captured: {}, error: 'No webhook inbox is available for this run.'};
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const hook = await opts.inbox.claim(match, {since, by: node.id});
+    if (hook) return take(hook, false);
+    if (opts.signal?.aborted) return {ok: false, captured: {}, error: 'stopped while waiting'};
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, Math.min(POLL_MS, Math.max(0, deadline - Date.now()))));
+  }
+
+  // What arrived but did not match is the single most useful thing to say here —
+  // it is the difference between "the provider never called" and "it called with
+  // a reference you are not matching on".
+  const near = (await opts.inbox.describeUnmatched?.(since)) ?? [];
+  const waited = `${(timeoutMs / 1000).toFixed(0)}s`;
+  const wanted = match.correlateOn
+    ? ` where ${match.correlateOn} = ${JSON.stringify(match.equals)}`
+    : '';
+  return {
+    ok: false,
+    captured: {},
+    error:
+      `Waited ${waited} for a webhook on "${match.path ?? '(any path)'}"${wanted} and none arrived.` +
+      (near.length ? ` ${near.length} other deliver${near.length === 1 ? 'y' : 'ies'} did: ${near.slice(0, 3).join('; ')}` : ''),
+  };
+}
+
 export async function runJourney(journey: Journey, opts: RunOptions): Promise<RunResult> {
   const {env, lookup, transport, hooks, signal} = opts;
   const ctx = newContext(env, opts.priorResponses, opts.seed);
@@ -195,6 +327,11 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
   for (const [id, res] of Object.entries(opts.priorResponses ?? {})) {
     states[id] = {status: 'skipped', response: res};
   }
+
+  // Deliveries older than the run belong to a previous one. Stamped before the
+  // first step so a webhook that arrives while step one is still in flight — the
+  // common case with a fast provider — is still claimable when step three asks.
+  const since = new Date().toISOString();
 
   const ordered = topoOrder(journey.nodes, journey.edges);
   const wanted = opts.startAt ? downstreamOf(opts.startAt, journey.edges) : null;
@@ -236,6 +373,35 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
     const started = Date.now();
 
     try {
+      if (def.control === 'await') {
+        const outcome = await awaitHook(def, node, ctx, opts, since);
+        const state: NodeState = {
+          ...(outcome.ok ? {status: 'passed' as RunStatus} : {status: 'failed' as RunStatus, error: outcome.error}),
+          durationMs: Date.now() - started,
+          ...(outcome.hook ? {response: asResponse(outcome.hook)} : {}),
+          ...(outcome.mocked ? {mocked: true} : {}),
+          ...(node.teardown ? {teardown: true} : {}),
+        };
+
+        if (outcome.ok && outcome.hook) {
+          // Stored as a response, which is what makes every downstream mechanism
+          // work on a webhook without knowing it is one.
+          ctx.responses[node.id] = asResponse(outcome.hook);
+          for (const [key, value] of Object.entries(outcome.captured)) ctx.vars[key] = value;
+          extract(def.gives, ctx.responses[node.id], ctx, hooks?.onLog);
+        }
+
+        states[node.id] = state;
+        hooks?.onLog?.(
+          outcome.ok
+            ? `✓ ${label} · webhook${outcome.mocked ? ' (mocked)' : ''} · ${state.durationMs}ms`
+            : `✗ ${label} — ${outcome.error}`,
+        );
+        hooks?.onNodeEnd?.(node.id, state);
+        if (outcome.ok) hooks?.onContext?.(ctx);
+        return state.status;
+      }
+
       if (def.control) {
         const result = await runControl(def, node, ctx);
         const state: NodeState = {
