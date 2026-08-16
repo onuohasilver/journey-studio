@@ -6,6 +6,7 @@
 // it can offer them in a dropdown, and nothing else.
 
 import {readFileSync, existsSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import path from 'node:path';
 import type {AuthScheme, EnvironmentConfig} from '../src/core/types';
 
@@ -18,11 +19,21 @@ export interface SlackConfig {
   title?: string;
 }
 
+/** Where run metrics go, if anywhere. */
+export interface TelemetryConfig {
+  /** OTLP HTTP base, e.g. http://localhost:4318. */
+  endpoint?: string;
+  headers?: Record<string, string>;
+  serviceName?: string;
+}
+
 export interface ServerConfig {
   environments: EnvironmentConfig[];
   auth: Record<string, AuthScheme>;
   secrets: Record<string, string>;
   slack?: SlackConfig;
+  telemetry?: TelemetryConfig;
+  issues?: import('../src/core/issues').IssueConfig;
 }
 
 /** What the browser is allowed to know: names, never values. */
@@ -43,15 +54,74 @@ const DEFAULT_CONFIG: ServerConfig = {
   secrets: {},
 };
 
-/** `${env:NAME}` anywhere in a config string is replaced from the environment. */
-function expand(value: unknown): unknown {
+/**
+ * Where a config value can come from.
+ *
+ * The point of the non-`env` ones is that a team stops copying credentials into
+ * files at all: the value lives in the vault it already lives in, and the config
+ * says where to find it.
+ *
+ *   ${env:NAME}                    an environment variable
+ *   ${file:./secrets/token}        the contents of a file, trimmed
+ *   ${op://Vault/Item/field}       1Password, via its CLI
+ */
+export type Resolver = (reference: string) => string | undefined;
+
+/** Reads a file relative to the config, so a path in it means what it says. */
+function fileResolver(root: string): Resolver {
+  return (reference) => {
+    const target = path.resolve(root, reference);
+    if (!existsSync(target)) return undefined;
+    return readFileSync(target, 'utf8').trim();
+  };
+}
+
+/**
+ * 1Password, through the CLI the user has already signed into.
+ *
+ * Shelling out is the supported integration path — `op read` takes a reference
+ * and nothing else, so no part of the config becomes a command to run.
+ */
+function onePasswordResolver(): Resolver {
+  return (reference) => {
+    try {
+      return execFileSync('op', ['read', `op://${reference}`], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']}).trim();
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * Substitute every reference in a config.
+ *
+ * An unresolved reference is **left in place**, not blanked. This is the same
+ * choice the template engine makes, for the same reason: a request that fails
+ * carrying a literal `${env:API_TOKEN}` says exactly what is wrong, and one that
+ * fails carrying an empty header looks like the API rejecting you. Silently
+ * substituting nothing for a missing secret is how an afternoon disappears.
+ */
+export function expandConfig(
+  value: unknown,
+  resolvers: Record<string, Resolver>,
+  missing: string[] = [],
+): unknown {
   if (typeof value === 'string') {
-    return value.replace(/\$\{env:([A-Za-z0-9_]+)\}/g, (_m, name: string) => process.env[name] ?? '');
+    return value.replace(/\$\{([a-z0-9_]+):(\/\/)?([^}]+)\}/gi, (whole, scheme: string, slashes: string | undefined, rest: string) => {
+      const resolve = resolvers[scheme.toLowerCase()];
+      if (!resolve) return whole;
+      const resolved = resolve(slashes ? rest : rest);
+      if (resolved === undefined || resolved === '') {
+        missing.push(whole);
+        return whole;
+      }
+      return resolved;
+    });
   }
-  if (Array.isArray(value)) return value.map(expand);
+  if (Array.isArray(value)) return value.map((v) => expandConfig(v, resolvers, missing));
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = expand(v);
+    for (const [k, v] of Object.entries(value)) out[k] = expandConfig(v, resolvers, missing);
     return out;
   }
   return value;
@@ -76,7 +146,24 @@ export function loadConfig(root = process.cwd()): ServerConfig {
     }
   }
 
-  const expanded = expand(raw) as Partial<ServerConfig>;
+  const missing: string[] = [];
+  const expanded = expandConfig(
+    raw,
+    {
+      env: (name) => process.env[name],
+      file: fileResolver(root),
+      op: onePasswordResolver(),
+    },
+    missing,
+  ) as Partial<ServerConfig>;
+
+  if (missing.length) {
+    // Loud, once, at load. The alternative is a 401 an hour later that looks
+    // like the API's fault.
+    process.stderr.write(
+      `! Could not resolve ${[...new Set(missing)].join(', ')} — left as written, so the failure will say so.\n`,
+    );
+  }
 
   // Any JOURNEY_SECRET_FOO env var becomes the secret `foo`, so a secret never
   // has to be written into a file at all.
@@ -92,11 +179,20 @@ export function loadConfig(root = process.cwd()): ServerConfig {
     webhookUrl: expanded.slack?.webhookUrl || process.env.SLACK_WEBHOOK_URL || undefined,
   };
 
+  const telemetry: TelemetryConfig = {
+    ...expanded.telemetry,
+    endpoint: expanded.telemetry?.endpoint || process.env.OTEL_EXPORTER_OTLP_ENDPOINT || undefined,
+  };
+
   cached = {
     environments: expanded.environments?.length ? expanded.environments : DEFAULT_CONFIG.environments,
     auth: expanded.auth ?? {},
     secrets: {...(expanded.secrets ?? {}), ...fromEnv},
     ...(slack.webhookUrl || slack.title ? {slack} : {}),
+    ...(telemetry.endpoint ? {telemetry} : {}),
+    ...(expanded.issues?.repo
+      ? {issues: {...expanded.issues, token: expanded.issues.token || process.env.GITHUB_TOKEN || ''}}
+      : {}),
   };
   return cached;
 }

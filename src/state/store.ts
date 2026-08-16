@@ -62,6 +62,7 @@ export interface SavedSummary {
   cases: number;
   snapshot: boolean;
   tags: string[];
+  uses: string[];
 }
 
 interface StudioState {

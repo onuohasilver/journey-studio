@@ -16,6 +16,7 @@
 //   journey run --tag smoke              only journeys carrying that tag
 //   journey run --var env=eu             seed a value into every run
 //   journey run --mock-webhooks          deliver saved payloads instead of waiting
+//   journey sweep                        delete what earlier failed runs left behind
 //   journey compare --env staging --with prod   the same journey, both sides
 //
 // Exit code is 1 on any failure, so CI stops without anyone wiring up a parser.
@@ -40,12 +41,15 @@ import {
 } from '../src/core/report';
 import {compareRuns, summariseComparison} from '../src/core/compare';
 import {selectJourneys} from '../src/core/select';
-import {describeTrend, trendsFrom} from '../src/core/history';
+import {orderBySetup, type SetupResult} from '../src/core/setup';
+import {describeTrend, markSwept, orphansIn, trendsFrom, type StepTrend} from '../src/core/history';
 import {githubWorkflow, toJunitXml} from '../src/core/junit';
+import {sendOtlp} from '../src/core/otlp';
+import {fileIssues, planFilings} from '../src/core/issues';
 import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from '../server/config';
 import {sendRequest} from '../server/proxy';
-import {listJourneys, loadJourney, loadSnapshot, saveSnapshot, loadHistory, recordHistory, type JourneySummary} from '../server/journeys';
+import {listJourneys, loadJourney, loadSnapshot, saveSnapshot, loadHistory, recordHistory, saveHistory, type JourneySummary} from '../server/journeys';
 import {createInboxRouter, inbox, loadMocks} from '../server/inbox';
 import type {Journey, NodeState, ResolvedRequest} from '../src/core/types';
 
@@ -61,6 +65,8 @@ interface Options {
   strictBudget: boolean;
   noHistory: boolean;
   junit?: string;
+  otlp: boolean;
+  fileIssues: boolean;
   tags: string[];
   vars: Record<string, unknown>;
   updateSnapshots: boolean;
@@ -80,6 +86,8 @@ function parseArgs(argv: string[]): Options {
     strictSnapshot: false,
     strictBudget: false,
     noHistory: false,
+    otlp: false,
+    fileIssues: false,
     tags: [],
     vars: {},
     updateSnapshots: false,
@@ -102,6 +110,8 @@ function parseArgs(argv: string[]): Options {
       case '--with': options.with = argv[++i]; break;
       case '--mock-webhooks': options.mockWebhooks = true; break;
       case '--no-history': options.noHistory = true; break;
+      case '--otlp': options.otlp = true; break;
+      case '--file-issues': options.fileIssues = true; break;
       case '--junit': options.junit = argv[++i] ?? 'junit.xml'; break;
       case '--tag': options.tags.push(...String(argv[++i] ?? '').split(',').map((t) => t.trim()).filter(Boolean)); break;
       case '--var': {
@@ -138,6 +148,8 @@ const USAGE = `journey run [names…] [options]
   --repeat <n>          run the suite n times and report flaky steps
   --report <file>       write the full report as JSON
   --junit <file>        write JUnit XML, which every CI renders natively
+  --otlp                export metrics to the configured OTLP collector
+  --file-issues         open, update and close tracker issues for failing steps
   --tag <name>          only journeys carrying this tag (repeatable, or a,b)
   --var <key=value>     seed a value into every run (repeatable)
   --slack               post the result to the configured webhook
@@ -155,6 +167,11 @@ const USAGE = `journey run [names…] [options]
 journey init --ci
 
   Write .github/workflows/journeys.yml — the suite on every push and nightly.
+
+journey sweep [names…] --env <name>
+
+  Deletes what earlier failed runs created and never cleaned up, by running each
+  journey's clean-up steps against the values history recorded.
 
 journey compare [names…] --env <a> --with <b>
 
@@ -189,7 +206,27 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
     send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
   };
 
-  const wanted = select(await listJourneys(root), options, root);
+  const available = await listJourneys(root);
+  const chosen = select(available, options, root);
+
+  // Setups are pulled in even when the filter did not name them: `--tag smoke`
+  // means "run the smoke tests", not "run them without logging in first".
+  const needed = new Set(chosen.map((j) => j.file));
+  const addSetups = (journey: JourneySummary) => {
+    for (const use of journey.uses) {
+      const found = available.find(
+        (j) => j.name === use || j.file === use || j.file === `${use}.journey.json`,
+      );
+      if (found && !needed.has(found.file)) {
+        needed.add(found.file);
+        addSetups(found);
+      }
+    }
+  };
+  chosen.forEach(addSetups);
+
+  const {ordered: wanted, problems} = orderBySetup(available.filter((j) => needed.has(j.file)));
+  for (const problem of problems) process.stderr.write(`  ! ${problem}\n`);
 
   // A CSV on the command line overrides whatever the file carries, so the same
   // saved journey can be pointed at a different dataset per environment.
@@ -206,10 +243,35 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const reports: JourneyReport[] = [];
+  /** What each setup journey produced, by the name others refer to it as. */
+  const setups = new Map<string, SetupResult>();
+  const skipped: {name: string; reason: string}[] = [];
 
   for (const summary of wanted) {
     const saved = await loadJourney(root, summary.file);
     if (!saved) continue;
+
+    // What its setups produced, resolved before this journey runs. Each setup
+    // has already run by now: `orderBySetup` put it earlier in this loop.
+    const inherited: Record<string, unknown> = {};
+    let blockedBy: string | undefined;
+    for (const use of saved.journey.uses ?? []) {
+      const result = setups.get(use);
+      if (!result) continue;
+      if (!result.ok) {
+        blockedBy = `${use} (${result.error ?? 'setup failed'})`;
+        break;
+      }
+      Object.assign(inherited, result.vars);
+    }
+
+    if (blockedBy) {
+      // Skipped, not failed. Twenty red rows for one broken login buries the
+      // news, and these journeys never touched the API under test.
+      if (!options.quiet) process.stdout.write(`  · ${summary.name} — skipped, needs ${blockedBy}\n`);
+      skipped.push({name: summary.name, reason: blockedBy});
+      continue;
+    }
 
     // Definitions travel inside the file, so CI needs no spec and no import.
     resetRegistry();
@@ -240,7 +302,10 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       baseline: recorded?.nodes,
       // Under the case's own values: a row that names `country` should win over
       // a blanket --var, or the flag would silently flatten a data-driven run.
-      ...(Object.keys(options.vars).length ? {seed: options.vars} : {}),
+      // Setup output sits under both — it is a default, not an instruction.
+      ...(Object.keys(inherited).length || Object.keys(options.vars).length
+        ? {seed: {...inherited, ...options.vars}}
+        : {}),
       inbox: {
         async claim(match, claimOpts) { return inbox.claim(match, claimOpts); },
         async describeUnmatched(since) { return inbox.describeUnmatched(since); },
@@ -260,6 +325,28 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
           caseName: run.case?.name,
         }),
       );
+    }
+
+    // If anything uses this journey as a setup, publish what it produced.
+    const dependedOn = available.some((j) =>
+      j.uses.some((u) => u === summary.name || u === summary.file || `${u}.journey.json` === summary.file),
+    );
+    if (dependedOn) {
+      const last = runs[runs.length - 1];
+      const gave = last?.result.context.vars ?? {};
+      const passed = runs.every((r) => r.result.passed);
+      const result: SetupResult = {
+        vars: passed ? gave : {},
+        ok: passed,
+        ...(passed ? {} : {error: 'its own steps failed'}),
+      };
+      for (const alias of [summary.name, summary.file, summary.file.replace(/\.journey\.json$/, '')]) {
+        setups.set(alias, result);
+      }
+      if (!options.quiet && passed) {
+        const keys = Object.keys(gave);
+        process.stdout.write(`  ↳ ${summary.name} set up ${keys.length ? keys.join(', ') : 'nothing'} for the rest\n`);
+      }
     }
 
     if (!options.noHistory) {
@@ -292,11 +379,13 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
     }
   }
 
-  return buildReport(env, reports, {
+  const report = buildReport(env, reports, {
     startedAt,
     durationMs: Date.now() - started,
     baseUrl: environment.baseUrl,
   });
+  if (skipped.length) report.skipped = skipped;
+  return report;
 }
 
 /** Run every wanted journey in one environment, keeping the raw states. */
@@ -379,6 +468,92 @@ async function awaitsWebhook(options: Options, root: string): Promise<boolean> {
   return false;
 }
 
+/**
+ * Delete what earlier runs created and never cleaned up.
+ *
+ * No new mechanism: a journey already knows how to remove what it makes — that
+ * is what its clean-up steps are — and history already remembers what each run
+ * left. Sweeping is running the one against the other.
+ */
+async function sweep(options: Options, root: string): Promise<number> {
+  const config = loadConfig(root);
+  const env = options.env ?? config.environments[0]?.name ?? '';
+  if (!config.environments.some((e) => e.name === env)) {
+    throw new Error(`No environment called "${env}". Known: ${config.environments.map((e) => e.name).join(', ')}`);
+  }
+  const transport: Transport = {
+    send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
+  };
+
+  const wanted = select(await listJourneys(root), options, root);
+  let cleaned = 0;
+  let stuck = 0;
+
+  for (const summary of wanted) {
+    const history = await loadHistory(root, summary.file);
+    // Only this environment's leftovers: an id created on staging means nothing
+    // in production, and deleting by it there would be a very bad surprise.
+    const orphans = orphansIn(history).filter((entry) => entry.env === env);
+    if (!orphans.length) continue;
+
+    const saved = await loadJourney(root, summary.file);
+    if (!saved) continue;
+
+    const teardown = saved.journey.nodes.filter((n) => n.teardown);
+    if (!teardown.length) {
+      process.stdout.write(
+        `  ! ${summary.name} left ${orphans.length} run${orphans.length === 1 ? '' : 's'} behind but has no ` +
+          `clean-up steps — nothing to sweep with.\n`,
+      );
+      stuck += orphans.length;
+      continue;
+    }
+
+    resetRegistry();
+    register(BUILTINS);
+    register(saved.defs);
+
+    // Only the clean-up steps, seeded with what that run produced.
+    const onlyTeardown = {...saved.journey, nodes: teardown, edges: [], cases: undefined};
+    const swept: typeof orphans = [];
+
+    for (const orphan of orphans) {
+      const seed = Object.fromEntries((orphan.created ?? []).map((c) => [c.key, c.value]));
+      const label = `${summary.name}${orphan.case ? ` › ${orphan.case}` : ''} · ${orphan.at.slice(0, 16).replace('T', ' ')}`;
+      const result = await runJourney(onlyTeardown, {
+        env,
+        lookup: withMaterialised(lookup),
+        transport,
+        seed,
+      });
+
+      // `leaked` is the honest signal here: the clean-up steps ran as teardown,
+      // so a failure lands there rather than in `passed`.
+      if (result.leaked.length) {
+        process.stdout.write(`  ✗ ${label} — still there: ${result.leaked.join(', ')}\n`);
+        stuck += 1;
+        continue;
+      }
+      process.stdout.write(
+        `  ✓ ${label} — removed ${(orphan.created ?? []).map((c) => `${c.key}=${c.value}`).join(', ')}\n`,
+      );
+      swept.push(orphan);
+      cleaned += 1;
+    }
+
+    if (swept.length && history) {
+      await saveHistory(root, summary.file, markSwept(history, swept, new Date().toISOString()));
+    }
+  }
+
+  if (!cleaned && !stuck) {
+    process.stdout.write(`Nothing left behind on ${env}.\n`);
+    return 0;
+  }
+  process.stdout.write(`\nSwept ${cleaned} run${cleaned === 1 ? '' : 's'} on ${env}${stuck ? `, ${stuck} still stuck` : ''}.\n`);
+  return stuck ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === 'help' || command === '--help') {
@@ -403,7 +578,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  if (command !== 'run' && command !== 'compare') {
+  if (command !== 'run' && command !== 'compare' && command !== 'sweep') {
     process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
     return 2;
   }
@@ -412,6 +587,7 @@ async function main(): Promise<number> {
   const root = process.cwd();
 
   if (command === 'compare') return compare(options, root);
+  if (command === 'sweep') return sweep(options, root);
 
   // A journey that waits for a callback needs somewhere for it to land. Opened
   // only when one actually waits, and only when the run is not using mocks.
@@ -464,6 +640,37 @@ async function runAll(options: Options, root: string): Promise<number> {
   if (options.junit) {
     await writeFile(path.resolve(root, options.junit), toJunitXml(report), 'utf8');
     process.stdout.write(`junit written to ${options.junit}\n`);
+  }
+
+  if (options.otlp) {
+    const telemetry = loadConfig(root).telemetry;
+    if (!telemetry?.endpoint) {
+      process.stderr.write('\n--otlp given but no collector configured (telemetry.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT).\n');
+      return 2;
+    }
+    const sent = await sendOtlp(report, {endpoint: telemetry.endpoint, headers: telemetry.headers, serviceName: telemetry.serviceName});
+    // Never fatal: a collector being down is not a reason to fail a build.
+    process.stdout.write(sent.ok ? 'metrics exported\n' : `could not export metrics: ${sent.error}\n`);
+  }
+
+  if (options.fileIssues) {
+    const issues = loadConfig(root).issues;
+    if (!issues?.repo || !issues.token) {
+      process.stderr.write('\n--file-issues given but no tracker configured (issues.repo and issues.token).\n');
+      return 2;
+    }
+    // Trends give the plan its memory: a step failing for the fifth night is one
+    // issue with a new comment, not a fifth issue.
+    const trends = new Map<string, StepTrend>();
+    for (const summary of await listJourneys(root)) {
+      for (const trend of trendsFrom(await loadHistory(root, summary.file))) trends.set(trend.id, trend);
+    }
+
+    const results = await fileIssues(planFilings(report, trends), issues);
+    for (const result of results) {
+      if (result.outcome === 'nothing-to-do') continue;
+      process.stdout.write(`  ${result.outcome} ${result.url ?? ''}${result.error ? ` — ${result.error}` : ''}\n`);
+    }
   }
 
   if (options.slack) {

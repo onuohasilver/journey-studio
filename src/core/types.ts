@@ -242,6 +242,16 @@ export interface JourneyNode {
   /** Extra checks on this step's response, on top of whatever its type declares. */
   assertions?: Assertion[];
   /**
+   * Values to capture from this step's response, on top of whatever its type
+   * declares.
+   *
+   * Imported nodes get their `gives` from the document. A raw HTTP node has no
+   * document, so without this it can never produce anything — which makes it
+   * useless as the first step of a chain, and that is exactly where people reach
+   * for it.
+   */
+  gives?: Produces[];
+  /**
    * Keep re-sending until these hold.
    *
    * This is the answer to eventually-consistent APIs, and it exists to kill the
@@ -297,6 +307,13 @@ export interface Journey {
    * pull request is how a suite becomes something people skip.
    */
   tags?: string[];
+  /**
+   * Journeys that must run first, whose context this one inherits.
+   *
+   * Twenty journeys that each log in spend most of their time logging in, and
+   * leave twenty sessions behind. Naming the setup once means it runs once.
+   */
+  uses?: string[];
 }
 
 // ---- importing ----

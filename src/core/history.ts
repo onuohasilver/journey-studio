@@ -36,6 +36,18 @@ export interface HistoryEntry {
   steps: HistoryStep[];
   /** Set when the callbacks were mocked, so a green row is not misread later. */
   mocked?: number;
+  /**
+   * What the run created on the environment, and whether it cleaned up.
+   *
+   * Kept because a run that failed halfway is the one that leaves records
+   * behind, and nothing else remembers what they were. This is what `sweep`
+   * uses to go back and delete them.
+   */
+  created?: {key: string; value: string}[];
+  /** Clean-up steps that failed. Empty or absent means nothing was left. */
+  leaked?: string[];
+  /** Set once a sweep has dealt with this entry, so it is not retried forever. */
+  sweptAt?: string;
 }
 
 export interface HistoryFile {
@@ -62,6 +74,12 @@ export function entriesFrom(report: QaReport): HistoryEntry[] {
     durationMs: journey.durationMs,
     ...(journey.case ? {case: journey.case} : {}),
     ...(journey.mocked ? {mocked: journey.mocked} : {}),
+    // Only worth recording when there is something to go back for: a run that
+    // cleaned up after itself leaves no work for a sweep.
+    ...(journey.created.length && (journey.leaked.length || journey.status === 'failed')
+      ? {created: journey.created}
+      : {}),
+    ...(journey.leaked.length ? {leaked: journey.leaked} : {}),
     steps: journey.steps.map((step) => ({
       id: step.id,
       label: step.label,
@@ -178,6 +196,30 @@ export function trendsFrom(file: HistoryFile | undefined, limit = 20): StepTrend
       ...(lastChangedAt ? {lastChangedAt} : {}),
     };
   });
+}
+
+/**
+ * Runs that left records behind and have not been swept.
+ *
+ * A failed run whose teardown never ran is the common case; a run whose teardown
+ * ran and failed is the loud one. Both leave rows on a shared environment that
+ * nothing else will ever remove.
+ */
+export function orphansIn(file: HistoryFile | undefined): HistoryEntry[] {
+  return (file?.entries ?? []).filter(
+    (entry) => !entry.sweptAt && entry.created?.length && (entry.leaked?.length || entry.status === 'failed'),
+  );
+}
+
+/** Mark entries as dealt with, matched on their timestamp and case. */
+export function markSwept(file: HistoryFile, entries: HistoryEntry[], at: string): HistoryFile {
+  const done = new Set(entries.map((e) => `${e.at} ${e.case ?? ''}`));
+  return {
+    ...file,
+    entries: file.entries.map((entry) =>
+      done.has(`${entry.at} ${entry.case ?? ''}`) ? {...entry, sweptAt: at} : entry,
+    ),
+  };
 }
 
 /** A one-line account of a step's history, for a report or a Slack message. */

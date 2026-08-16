@@ -4,6 +4,8 @@ import {
   appendHistory,
   describeTrend,
   entriesFrom,
+  markSwept,
+  orphansIn,
   readHistory,
   trendsFrom,
   type HistoryEntry,
@@ -178,5 +180,52 @@ describe('reading the timeline', () => {
   it('has nothing to say about a journey that has never run', () => {
     expect(trendsFrom(undefined)).toEqual([]);
     expect(trendsFrom(file([]))).toEqual([]);
+  });
+});
+
+describe('finding what a run left behind', () => {
+  const withCreated = (over: Partial<JourneyReport> = {}) =>
+    report('2026-01-01T00:00:00Z', {created: [{key: 'petId', value: '42'}], ...over});
+
+  it('records what was created only when there is something to go back for', () => {
+    // A run that cleaned up after itself leaves no work for a sweep, so keeping
+    // its ids would just grow the file.
+    expect(entriesFrom(withCreated())[0].created).toBeUndefined();
+    expect(entriesFrom(withCreated({status: 'failed'}))[0].created).toEqual([{key: 'petId', value: '42'}]);
+    expect(entriesFrom(withCreated({leaked: ['Delete the pet']}))[0].leaked).toEqual(['Delete the pet']);
+  });
+
+  it('lists the runs that still need sweeping', () => {
+    const file = {
+      version: 1,
+      journey: 'Leaky',
+      entries: [
+        ...entriesFrom(withCreated({status: 'failed'})),
+        ...entriesFrom(withCreated()),                       // cleaned up, nothing to do
+      ],
+    };
+    expect(orphansIn(file)).toHaveLength(1);
+  });
+
+  it('does not offer an entry that has already been swept', () => {
+    const file = {version: 1, journey: 'Leaky', entries: entriesFrom(withCreated({status: 'failed'}))};
+    const marked = markSwept(file, file.entries, '2026-01-02T00:00:00Z');
+
+    expect(marked.entries[0].sweptAt).toBe('2026-01-02T00:00:00Z');
+    expect(orphansIn(marked)).toEqual([]);
+  });
+
+  it('marks only the entries it swept, matched by time and case', () => {
+    const file = {
+      version: 1,
+      journey: 'Leaky',
+      entries: [
+        {...entriesFrom(withCreated({status: 'failed', case: 'a'}))[0]},
+        {...entriesFrom(withCreated({status: 'failed', case: 'b'}))[0]},
+      ],
+    };
+    const marked = markSwept(file, [file.entries[0]], '2026-01-02T00:00:00Z');
+    expect(marked.entries[0].sweptAt).toBe('2026-01-02T00:00:00Z');
+    expect(marked.entries[1].sweptAt).toBeUndefined();
   });
 });

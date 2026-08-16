@@ -133,7 +133,7 @@ export function checkJourney(journey: Journey, lookup: DefLookup): Problem[] {
         });
       }
     }
-    for (const give of def.gives) available.add(give.key);
+    for (const give of [...def.gives, ...(node.gives ?? [])]) available.add(give.key);
 
     // Keys written from the node's own config — "Set values" gives whatever you
     // typed into it. These are the ones that can shadow a case, because they are

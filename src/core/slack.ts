@@ -150,6 +150,17 @@ export function formatReport(report: QaReport, meta: {title?: string; link?: str
     );
   }
 
+  if (report.skipped?.length) {
+    blocks.push(
+      section(
+        `:no_entry_sign: *${report.skipped.length} journey${report.skipped.length === 1 ? '' : 's'} did not run* — ` +
+          `${report.skipped.slice(0, 5).map((s) => escape(s.name)).join(', ')} ` +
+          `${report.skipped.length > 5 ? `and ${report.skipped.length - 5} more ` : ''}` +
+          `need a setup that failed.`,
+      ),
+    );
+  }
+
   if (report.flaky?.length) {
     blocks.push(
       section(

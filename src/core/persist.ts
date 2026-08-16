@@ -125,6 +125,9 @@ export function readSaved(text: string, registered: (type: string) => NodeDef | 
         ...(Array.isArray(saved.journey.tags) && saved.journey.tags.length
           ? {tags: saved.journey.tags.map(String)}
           : {}),
+        ...(Array.isArray(saved.journey.uses) && saved.journey.uses.length
+          ? {uses: saved.journey.uses.map(String)}
+          : {}),
       },
       defs: saved.defs ?? [],
       sources: saved.sources,

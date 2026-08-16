@@ -81,6 +81,13 @@ export interface QaReport {
   flaky?: FlakyStep[];
   /** Steps whose p95 blew their budget. Populated by `findSlowSteps`. */
   slow?: StepTiming[];
+  /**
+   * Journeys that never ran because a setup they depend on failed.
+   *
+   * Distinct from failed on purpose: they did not touch the API under test, and
+   * calling them failures would put twenty red rows around one broken login.
+   */
+  skipped?: {name: string; reason: string}[];
 }
 
 export interface FlakyStep {
@@ -173,7 +180,7 @@ export function buildJourneyReport(
   for (const node of ordered) {
     const def = lookup(node.type);
     if (!def || states[node.id]?.status !== 'passed') continue;
-    for (const give of def.gives) {
+    for (const give of [...def.gives, ...(node.gives ?? [])]) {
       if (context?.vars[give.key] === undefined) continue;
       createdByKey.set(give.key, short(context.vars[give.key]));
     }
@@ -372,6 +379,14 @@ export function summariseText(report: QaReport): string {
     }
     if (journey.leaked.length) {
       lines.push(`  LEFT BEHIND: ${journey.leaked.join(', ')} could not clean up`);
+    }
+  }
+
+  if (report.skipped?.length) {
+    lines.push('');
+    lines.push('Not run:');
+    for (const skip of report.skipped) {
+      lines.push(`  · ${skip.name} — needs ${skip.reason}`);
     }
   }
 

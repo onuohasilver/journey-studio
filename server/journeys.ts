@@ -110,6 +110,14 @@ export async function recordHistory(
   }
 }
 
+/** Write a history file back, after a sweep has marked entries as dealt with. */
+export async function saveHistory(root: string, name: string, file: HistoryFile): Promise<void> {
+  const target = historyPath(root, name);
+  if (!target) return;
+  await mkdir(path.dirname(target), {recursive: true});
+  await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, 'utf8');
+}
+
 export interface JourneySummary {
   name: string;
   file: string;
@@ -121,6 +129,8 @@ export interface JourneySummary {
   /** Whether a recorded shape exists to compare against. */
   snapshot: boolean;
   tags: string[];
+  /** Journeys this one needs run first. */
+  uses: string[];
 }
 
 export async function listJourneys(root: string): Promise<JourneySummary[]> {
@@ -141,11 +151,12 @@ export async function listJourneys(root: string): Promise<JourneySummary[]> {
         cases: saved.journey?.cases?.length ?? 0,
         snapshot: existsSync(path.join(root, SNAPSHOT_DIR, snapshotNameFor(file))),
         tags: saved.journey?.tags ?? [],
+        uses: saved.journey?.uses ?? [],
       });
     } catch {
       // A single unreadable file should not hide the rest of the suite.
       out.push({
-        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [],
+        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [], uses: [],
         description: 'could not be read',
       });
     }

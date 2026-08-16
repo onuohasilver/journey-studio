@@ -402,7 +402,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       if (wanted.has(node.id)) continue;
       const def = lookup(node.type, node);
       const res = ctx.responses[node.id];
-      if (def && res) extract(def.gives, res, ctx);
+      if (def && res) extract([...def.gives, ...(node.gives ?? [])], res, ctx);
     }
   }
 
@@ -581,7 +581,7 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         return 'failed';
       }
 
-      extract(def.gives, res, ctx, hooks?.onLog);
+      extract([...def.gives, ...(node.gives ?? [])], res, ctx, hooks?.onLog);
       // A passing step that drifted still says so — that is usually the most
       // interesting line in the whole run.
       const drift = [

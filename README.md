@@ -120,6 +120,9 @@ npx journey run --tag smoke           # only journeys carrying that tag
 npx journey run --var country=NG      # seed a value into every run
 npx journey run --junit junit.xml     # results every CI renders natively
 npx journey init --ci                 # write a working GitHub Action
+npx journey sweep --env staging       # delete what earlier failed runs left behind
+npx journey run --otlp                # export metrics to your collector
+npx journey run --file-issues         # open/update/close tracker issues
 npx journey run --no-history          # do not append this run to history/
 ```
 
@@ -387,6 +390,55 @@ delivered from a mock**. A mocked run must never read as proof the integration w
 `if: always()` — because the run worth having the report from is the one that failed, which is the
 line everyone forgets writing it by hand.
 
+### Setup a suite shares
+
+Twenty journeys that each log in spend most of their time logging in, hammer the auth endpoint twenty
+times, and leave twenty sessions for somebody to clean up. Name the setup once instead:
+
+```json
+{"uses": ["Login"], "tags": ["needs-login"]}
+```
+
+`Login` runs first, once, and whatever it produced is seeded into every journey that declares it —
+under a case's own values and under `--var`, since it is a default rather than an instruction. Setups
+are pulled in even when a filter did not name them: `--tag smoke` means "run the smoke tests", not
+"run them without logging in first".
+
+When the setup itself fails, its dependents are reported as **not run**, not failed:
+
+```
+✗ Login
+  ✗ Get a token · 404
+Not run:
+  · Alpha — needs Login (its own steps failed)
+  · Beta — needs Login (its own steps failed)
+```
+
+Twenty red rows for one broken login buries the news, and those journeys never touched the API under
+test. Calling them failures would be a lie about it.
+
+### Sweeping up
+
+A run that failed halfway is the one that leaves records behind, and if its clean-up step also failed
+— a 503 from the delete endpoint, say — they stay there forever. History remembers what each run
+created, so:
+
+```bash
+npx journey sweep --env staging
+```
+
+runs each journey's clean-up steps against the values that run produced:
+
+```
+✓ Leaky · 2026-08-16 10:01 — removed petId=775511
+Swept 1 run on local.
+```
+
+No new mechanism: a journey already knows how to remove what it makes. Swept entries are marked, so
+this is safe to run on a schedule, and only the current environment's leftovers are touched — an id
+created on staging means nothing in production, and deleting by it there would be a very bad
+surprise.
+
 ### Choosing what to run
 
 Tag a journey and run subsets:
@@ -429,6 +481,41 @@ the credential, so it stays on the server: the browser posts the report, never t
 The message leads with the verdict, then the failing steps and how to reproduce them, then what the
 run created. It never contains a response body.
 
+## Where the results go
+
+### Metrics
+
+```bash
+npx journey run --otlp
+```
+
+Exports over **OTLP**, which Datadog, Grafana, Honeycomb and the OpenTelemetry Collector all accept —
+one integration rather than one per vendor, and no SDK dependency in a tool whose pitch is that it
+lives in your repo. Step durations, pass/fail per step and per journey, drift, and budget breaches,
+tagged with environment, journey, case and step.
+
+Two deliberate choices. Durations are gauges, not histograms: a histogram of one observation is a lie
+dressed as statistics, and the percentile that matters is already computed across runs and cases.
+Mocked steps carry a `mocked` attribute, so a dashboard can exclude them from an integration SLO —
+counting a mocked run towards "the payment webhook works" is worse than no dashboard. A collector
+being down is reported and never fails the build.
+
+### Issues
+
+```bash
+npx journey run --file-issues
+```
+
+Opens one issue per failing step, comments on it while it stays broken, and closes it when it passes.
+**Deduplication is the entire feature** — without it this is a bot that files thirty issues a night
+and gets muted in a week, which is worse than nothing because it also trains people to ignore the
+tracker.
+
+The dedup key is a hidden marker in the issue body rather than something encoded in the title,
+because titles get edited by people and a key a human can break by tidying the wording is not a key.
+History supplies the memory: a step failing for the fifth night running is the same problem, so it
+gets a comment, not a fifth issue. A data-driven journey failing twelve rows of one step files once.
+
 ## Credentials
 
 The engine hands a resolved request to a transport; in the app that transport is a local proxy that
@@ -436,8 +523,18 @@ holds the secrets and substitutes them on the way out. The canvas only ever sees
 This also sidesteps CORS, since the APIs worth testing rarely allow a browser origin.
 
 `journey.config.json` holds environments and named auth schemes. Secrets belong in
-`journey.config.local.json` (gitignored) or in `JOURNEY_SECRET_*` environment variables, and
-`${env:NAME}` is expanded anywhere in the config.
+`journey.config.local.json` (gitignored), in `JOURNEY_SECRET_*` environment variables, or — better —
+nowhere near the repo at all:
+
+```
+${env:API_TOKEN}                an environment variable
+${file:./secrets/token}         the contents of a file
+${op://Vault/Item/credential}   1Password, through its CLI
+```
+
+A reference that cannot be resolved is **left in place**, not blanked. A request that fails carrying
+a literal `${env:API_TOKEN}` says exactly what is wrong; one that fails carrying an empty header looks
+like the API rejecting you, and that is an afternoon gone.
 
 ```json
 {
@@ -494,7 +591,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 331 tests, no network
+npm test        # 384 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -531,10 +628,12 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] HAR and curl import, so a flow with no spec still becomes a journey
 - [x] JUnit output and `journey init --ci`
 - [x] Tags and `--var`, for choosing what runs
-- [ ] Shared setup journeys, so a suite logs in once rather than twenty times
-- [ ] Sweep, to clean up records earlier failed runs left behind
-- [ ] OpenTelemetry metrics, so budgets sit beside production latency
-- [ ] Issue-tracker filing, deduplicated against `failing since`
+- [x] Shared setup journeys, so a suite logs in once rather than twenty times
+- [x] Sweep, to clean up records earlier failed runs left behind
+- [x] OpenTelemetry metrics, so budgets sit beside production latency
+- [x] Issue-tracker filing, deduplicated against `failing since`
+- [ ] Parallel journeys within a suite, for the runs that do not share data
+- [ ] Response snapshots per environment, so staging and prod keep separate baselines
 
 ## License
 
