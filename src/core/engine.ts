@@ -419,11 +419,32 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
       }
 
       const request = buildRequest(def, node, ctx)!;
-      const res = await transport.send(request, env);
-      ctx.responses[node.id] = res;
 
-      const assertions = runAssertions(res, def.assertions);
-      const failed = assertions.filter((a) => !a.pass);
+      // Checks that must hold, and checks worth waiting for. The second list is
+      // what replaces a fixed sleep: re-ask until the order says settled, rather
+      // than sleeping five seconds and hoping.
+      const must = [...(def.assertions ?? []), ...(node.assertions ?? [])];
+      const until = node.until ?? [];
+      const deadline = until.length ? Date.now() + (node.pollTimeoutMs ?? 30_000) : 0;
+      const everyMs = Math.max(50, node.pollEveryMs ?? 1_000);
+
+      let res: HttpResponse;
+      let assertions: ReturnType<typeof runAssertions>;
+      let failed: ReturnType<typeof runAssertions>;
+      let attempts = 0;
+
+      for (;;) {
+        attempts += 1;
+        res = await transport.send(request, env);
+        assertions = [...runAssertions(res, must), ...runAssertions(res, until)];
+        failed = assertions.filter((a) => !a.pass);
+
+        if (!failed.length || !until.length) break;
+        if (Date.now() + everyMs > deadline || opts.signal?.aborted) break;
+        await new Promise((r) => setTimeout(r, everyMs));
+      }
+
+      ctx.responses[node.id] = res;
 
       // The response is checked against the schema the source document declared.
       //
@@ -478,8 +499,16 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         ...(shapeChanges.length ? {shapeChanges} : {}),
         ...(overBudget ? {overBudget} : {}),
         ...(node.teardown ? {teardown: true} : {}),
+        ...(attempts > 1 ? {attempts} : {}),
         ...(failed.length
-          ? {error: failed.map(describeFailure).join('; ')}
+          ? {
+              error:
+                attempts > 1
+                  ? `${failed.map(describeFailure).join('; ')} — still true after ${attempts} attempts over ${(
+                      (node.pollTimeoutMs ?? 30_000) / 1000
+                    ).toFixed(0)}s`
+                  : failed.map(describeFailure).join('; '),
+            }
           : drifted
             ? {error: driftError.join('; ')}
             : {}),
@@ -501,7 +530,9 @@ export async function runJourney(journey: Journey, opts: RunOptions): Promise<Ru
         overBudget ? `${overBudget.actualMs}ms over a ${overBudget.budgetMs}ms budget` : '',
       ].filter(Boolean);
       hooks?.onLog?.(
-        `✓ ${label} · ${res.status} · ${res.durationMs}ms${drift.length ? ` · ⚠ ${drift.join(', ')}` : ''}`,
+        `✓ ${label} · ${res.status} · ${res.durationMs}ms` +
+          `${attempts > 1 ? ` · settled after ${attempts} tries` : ''}` +
+          `${drift.length ? ` · ⚠ ${drift.join(', ')}` : ''}`,
       );
       hooks?.onNodeEnd?.(node.id, state);
       hooks?.onContext?.(ctx);

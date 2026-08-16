@@ -171,6 +171,45 @@ This is an edit, not a rebuild. Every step you do not mention keeps its place, i
 - When a step failed on the last run, its error is on its CANVAS line. Fix the cause.
 - If what they asked for is already true, return no ops and say so in the summary.`;
 
+const ASSERT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['assertions'],
+  properties: {
+    assertions: {
+      type: 'array',
+      maxItems: 8,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'op', 'why'],
+        properties: {
+          path: {type: 'string', description: 'e.g. status, body.data.id'},
+          op: {enum: ['status', 'eq', 'neq', 'exists', 'absent', 'contains', 'matches', 'gt', 'lt']},
+          expected: {description: 'omit for exists/absent'},
+          why: {type: 'string', description: 'one short line: what regression this catches'},
+        },
+      },
+    },
+    skipped: {
+      type: 'array',
+      items: {type: 'string'},
+      description: 'fields deliberately not asserted on, and why',
+    },
+  },
+} as const;
+
+const ASSERT_TASK = `Your task now: propose assertions for one step, from the response it actually returned.
+
+What makes a good assertion here:
+- It catches a regression. "id is present" is worth having; "id equals 8fd2c1" is not — it will fail on the next run and teach the team to ignore red.
+- Prefer structure and invariants over values that change per run: ids, timestamps, tokens, balances, and anything generated. Assert those with exists, not eq.
+- Assert a value only when it is genuinely fixed for this call: a status, an enum, a currency, an echoed input, a computed total you can derive from the request.
+- If the spec declares a schema, do not restate it — contract checking already covers required fields and types. Add what the spec cannot know.
+- Fewer, sharper checks beat a wall of them. Six is plenty.
+
+List anything you deliberately left alone in "skipped", with the reason.`;
+
 const EXPLAIN_TASK =
   'Your task now: explain the journey below in plain English, for someone who has never seen this API. Use the refs given.';
 
@@ -308,6 +347,27 @@ export function createAiRouter(): Router {
         user: `JOURNEY\n${canvas}`,
         schema: EXPLAIN_SCHEMA,
         cutoff: 'The explanation was cut off. Try a shorter journey.',
+      }),
+    );
+  });
+
+  router.post('/assert', async (req: Request, res: Response) => {
+    const {step, response, schema, nodeIndex, environments} = req.body ?? {};
+    if (!response) {
+      res.status(400).json({error: 'Run the step first — there is no response to suggest checks from.'});
+      return;
+    }
+    res.json(
+      await callModel({
+        grounding: grounding({nodeIndex: nodeIndex ?? '', environments: environments ?? ''}),
+        task: ASSERT_TASK,
+        user: [
+          `STEP\n${step ?? '(unnamed)'}`,
+          schema ? `\nWHAT THE SPEC PROMISES\n${JSON.stringify(schema).slice(0, 4000)}` : '',
+          `\nWHAT IT ACTUALLY RETURNED\n${JSON.stringify(response).slice(0, 8000)}`,
+        ].join('\n'),
+        schema: ASSERT_SCHEMA,
+        cutoff: 'The suggestions were cut off. Try a step with a smaller response.',
       }),
     );
   });

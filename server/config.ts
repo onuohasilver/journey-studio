@@ -9,6 +9,8 @@ import {readFileSync, existsSync} from 'node:fs';
 import path from 'node:path';
 import type {AuthScheme, EnvironmentConfig} from '../src/core/types';
 
+export type OAuth2Scheme = Extract<AuthScheme, {type: 'oauth2'}>;
+
 export interface SlackConfig {
   /** Incoming webhook URL. This *is* the credential — it never leaves this side. */
   webhookUrl?: string;
@@ -26,7 +28,8 @@ export interface ServerConfig {
 /** What the browser is allowed to know: names, never values. */
 export interface PublicConfig {
   environments: {name: string; baseUrl: string}[];
-  authSchemes: string[];
+  /** Names and kinds, so the UI can say which schemes need a token fetched. */
+  authSchemes: {name: string; type: AuthScheme['type']}[];
   secretNames: string[];
   /** Whether a report can be posted — never the webhook itself. */
   slackConfigured: boolean;
@@ -101,7 +104,7 @@ export function loadConfig(root = process.cwd()): ServerConfig {
 export function publicConfig(config: ServerConfig): PublicConfig {
   return {
     environments: config.environments.map((e) => ({name: e.name, baseUrl: e.baseUrl})),
-    authSchemes: Object.keys(config.auth),
+    authSchemes: Object.entries(config.auth).map(([name, scheme]) => ({name, type: scheme.type})),
     secretNames: Object.keys(config.secrets),
     slackConfigured: Boolean(config.slack?.webhookUrl),
   };

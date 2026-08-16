@@ -12,6 +12,7 @@
 import type {Request, Response, Router} from 'express';
 import express from 'express';
 import {loadConfig, publicConfig, type ServerConfig} from './config';
+import {getToken} from './auth';
 import type {AuthScheme, ResolvedRequest} from '../src/core/types';
 
 /** Substitute `{{secrets.name}}` anywhere in a structure. */
@@ -30,7 +31,13 @@ function applySecrets<T>(value: T, secrets: Record<string, string>): T {
   return value;
 }
 
-function applyAuth(scheme: AuthScheme | undefined, headers: Record<string, string>, url: URL): void {
+async function applyAuth(
+  name: string | undefined,
+  scheme: AuthScheme | undefined,
+  headers: Record<string, string>,
+  url: URL,
+  forceRefresh = false,
+): Promise<void> {
   if (!scheme) return;
   switch (scheme.type) {
     case 'bearer':
@@ -45,6 +52,11 @@ function applyAuth(scheme: AuthScheme | undefined, headers: Record<string, strin
     case 'basic':
       headers.authorization = `Basic ${Buffer.from(`${scheme.username}:${scheme.password}`).toString('base64')}`;
       break;
+    case 'oauth2': {
+      const token = await getToken(name ?? 'oauth2', scheme, forceRefresh);
+      headers.authorization = `${token.tokenType || 'Bearer'} ${token.accessToken}`;
+      break;
+    }
   }
 }
 
@@ -72,7 +84,8 @@ export async function sendRequest(
     ...Object.fromEntries(Object.entries(resolved.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)])),
   };
 
-  applyAuth(resolved.auth ? config.auth[resolved.auth] : undefined, headers, url);
+  const scheme = resolved.auth ? config.auth[resolved.auth] : undefined;
+  await applyAuth(resolved.auth, scheme, headers, url);
 
   let payload: string | undefined;
   if (resolved.body !== undefined && resolved.body !== null && resolved.method !== 'GET' && resolved.method !== 'HEAD') {
@@ -86,7 +99,16 @@ export async function sendRequest(
   }
 
   const started = Date.now();
-  const res = await fetch(url, {method: resolved.method, headers, body: payload});
+  let res = await fetch(url, {method: resolved.method, headers, body: payload});
+
+  // A cached token that the API rejects means it was revoked or rotated early.
+  // One forced refresh recovers from that; a loop would turn a bad credential
+  // into a denial-of-service against your own auth server.
+  if (res.status === 401 && scheme?.type === 'oauth2') {
+    await applyAuth(resolved.auth, scheme, headers, url, true);
+    res = await fetch(url, {method: resolved.method, headers, body: payload});
+  }
+
   const text = await res.text();
   const durationMs = Date.now() - started;
 

@@ -325,9 +325,38 @@ This also sidesteps CORS, since the APIs worth testing rarely allow a browser or
 ```json
 {
   "environments": [{"name": "demo", "baseUrl": "https://petstore3.swagger.io/api/v3"}],
-  "auth": {"bearer": {"type": "bearer", "token": "${env:API_TOKEN}"}}
+  "auth": {
+    "bearer": {"type": "bearer", "token": "${env:API_TOKEN}"},
+    "api": {
+      "type": "oauth2",
+      "tokenUrl": "https://issuer.example.com/oauth/token",
+      "grant": "client_credentials",
+      "clientId": "${env:CLIENT_ID}",
+      "clientSecret": "${env:CLIENT_SECRET}",
+      "scope": "payments:write"
+    }
+  }
 }
 ```
+
+### Tokens that expire
+
+Static credentials are the easy half. Every API worth testing hands you a token that dies in an hour,
+and a tool that makes you paste a fresh one before each session is one nobody uses twice. An `oauth2`
+scheme is fetched and refreshed by the proxy, so an unattended nightly run works.
+
+Three details that only show up in practice:
+
+- **Expiry is treated as earlier than it says.** A token that expires *during* a request looks exactly
+  like a broken integration, and this machine's clock is not the issuer's.
+- **Concurrent runs share one fetch.** Twelve cases starting at once must not send twelve requests to
+  the token endpoint; plenty of providers rate-limit that hard, and a suite that fails on its own auth
+  is worse than no suite.
+- **A 401 refreshes and retries exactly once.** Credentials get revoked early — one retry recovers,
+  and a loop would turn a bad credential into a denial-of-service against your own auth server. The
+  second 401 is returned to the journey to assert on rather than swallowed.
+
+Tokens are held in the node process and never sent to the browser, like every other secret here.
 
 ## Templating
 

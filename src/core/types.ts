@@ -174,6 +174,8 @@ export interface NodeState {
   shapeChanges?: import('./snapshot').ShapeChange[];
   /** Set when the step took longer than the budget it declared. */
   overBudget?: {budgetMs: number; actualMs: number};
+  /** How many times the request was sent. Above one means it polled. */
+  attempts?: number;
   /** Marks a state produced by a cleanup step rather than the journey proper. */
   teardown?: boolean;
   /**
@@ -213,6 +215,21 @@ export interface JourneyNode {
    * unless the run is strict — one cold start should not turn a suite red.
    */
   budgetMs?: number;
+  /** Extra checks on this step's response, on top of whatever its type declares. */
+  assertions?: Assertion[];
+  /**
+   * Keep re-sending until these hold.
+   *
+   * This is the answer to eventually-consistent APIs, and it exists to kill the
+   * fixed sleep — which is the single largest source of flaky API tests. "Wait 5
+   * seconds and hope" is both slower than it needs to be on a good day and still
+   * wrong on a bad one; "ask again until the order says settled" is neither.
+   */
+  until?: Assertion[];
+  /** How often to re-send while waiting for `until`. */
+  pollEveryMs?: number;
+  /** How long to keep trying before the step fails. */
+  pollTimeoutMs?: number;
 }
 
 export interface JourneyEdge {
@@ -275,11 +292,32 @@ export interface EnvironmentConfig {
   headers?: Record<string, string>;
 }
 
+/**
+ * How a request proves who it is. Applied by the proxy, never in the browser.
+ *
+ * `oauth2` is the one that matters in practice: static credentials are fine for
+ * a demo, but every API worth testing issues a token that expires, and the proxy
+ * fetching and refreshing it is what makes an unattended nightly run possible.
+ */
 export type AuthScheme =
   | {type: 'bearer'; token: string}
   | {type: 'header'; name: string; value: string}
   | {type: 'query'; name: string; value: string}
-  | {type: 'basic'; username: string; password: string};
+  | {type: 'basic'; username: string; password: string}
+  | {
+      type: 'oauth2';
+      tokenUrl: string;
+      grant?: 'client_credentials' | 'password';
+      clientId?: string;
+      clientSecret?: string;
+      /** Some issuers demand the client in a Basic header rather than the body. */
+      clientAuth?: 'body' | 'basic';
+      scope?: string;
+      audience?: string;
+      /** Only for the password grant, which some internal APIs still require. */
+      username?: string;
+      password?: string;
+    };
 
 export interface StudioConfig {
   environments: EnvironmentConfig[];

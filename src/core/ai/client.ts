@@ -59,3 +59,32 @@ export const requestRevision = (body: Omit<ReviseRequest, 'goal'>) => post<RawEd
 
 export const requestExplanation = (body: {canvas: string; nodeIndex: string; environments: string}) =>
   post<Explanation>('/api/ai/explain', body);
+
+export interface SuggestedAssertion {
+  path: string;
+  op: string;
+  expected?: unknown;
+  /** One line on the regression it catches — the part worth reading. */
+  why: string;
+}
+
+export interface AssertionSuggestions {
+  assertions: SuggestedAssertion[];
+  /** Fields deliberately left alone, and why. */
+  skipped?: string[];
+}
+
+/**
+ * Ask for checks based on what a step actually returned.
+ *
+ * Note what crosses the wire: the response body goes to the model. Bodies
+ * routinely hold tokens and personal data, so this is a deliberate action with a
+ * warning next to it rather than something that happens on every run.
+ */
+export const requestAssertions = (body: {
+  step: string;
+  response: unknown;
+  schema?: unknown;
+  nodeIndex: string;
+  environments: string;
+}) => post<AssertionSuggestions>('/api/ai/assert', body);

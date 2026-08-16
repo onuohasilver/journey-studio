@@ -14,13 +14,14 @@ import {importDocument} from '../core/import';
 import {applyOps, buildChain, type AppliedChange} from '../core/ai/apply';
 import {buildCanvasIndex, buildJourneyDigest, buildNodeIndex} from '../core/ai/grounding';
 import {validateEdit, validatePlan} from '../core/ai/validate';
-import {requestExplanation, requestPlan, requestRevision, type Explanation} from '../core/ai/client';
+import {requestAssertions, requestExplanation, requestPlan, requestRevision, type AssertionSuggestions, type Explanation} from '../core/ai/client';
 import {createHistory} from './history';
 import {buildJourneyReport, buildReport, type QaReport} from '../core/report';
 import type {Shape} from '../core/snapshot';
 import type {HookMatch, HookMock, InboxSource, ReceivedHook} from '../core/inbox';
 import {fileNameFor, packJourney, readSaved, type SavedJourney} from '../core/persist';
 import type {
+  Assertion,
   HttpResponse,
   ImportResult,
   Journey,
@@ -35,7 +36,7 @@ import type {
 /** Public config, fetched once at boot. Values never leave the server. */
 export interface ClientConfig {
   environments: {name: string; baseUrl: string}[];
-  authSchemes: string[];
+  authSchemes: {name: string; type: string}[];
   secretNames: string[];
 }
 
@@ -128,6 +129,9 @@ interface StudioState {
   setCases(cases: JourneyCase[] | undefined): void;
   setTeardown(id: string, teardown: boolean): void;
   setBudget(id: string, budgetMs: number | undefined): void;
+  setAssertions(id: string, assertions: Assertion[] | undefined): void;
+  setUntil(id: string, until: Assertion[] | undefined): void;
+  setPoll(id: string, patch: {pollEveryMs?: number; pollTimeoutMs?: number}): void;
   recordSnapshot(): Promise<{ok: boolean; error?: string; nodes?: number}>;
 
   refreshInbox(): Promise<void>;
@@ -146,6 +150,7 @@ interface StudioState {
   plan(goal: string, thenRun: boolean): Promise<void>;
   revise(instruction: string, thenRun: boolean): Promise<void>;
   explain(): Promise<void>;
+  suggestAssertions(id: string): Promise<AssertionSuggestions & {error?: string}>;
   resetConversation(): void;
 }
 
@@ -503,6 +508,40 @@ export const useStudio = create<StudioState>((set, get) => {
     );
   },
 
+  setAssertions(id, assertions) {
+    mutate(
+      'change checks',
+      (journey) => ({
+        ...journey,
+        nodes: journey.nodes.map((n) => (n.id === id ? {...n, assertions: assertions?.length ? assertions : undefined} : n)),
+      }),
+      // Typing a path is many keystrokes, not many undo steps.
+      `assertions:${id}`,
+    );
+  },
+
+  setUntil(id, until) {
+    mutate(
+      'change wait condition',
+      (journey) => ({
+        ...journey,
+        nodes: journey.nodes.map((n) => (n.id === id ? {...n, until: until?.length ? until : undefined} : n)),
+      }),
+      `until:${id}`,
+    );
+  },
+
+  setPoll(id, patch) {
+    mutate(
+      'change polling',
+      (journey) => ({
+        ...journey,
+        nodes: journey.nodes.map((n) => (n.id === id ? {...n, ...patch} : n)),
+      }),
+      `poll:${id}`,
+    );
+  },
+
   async recordSnapshot() {
     const {journey, states, env} = get();
     const nodes = shapesFrom(states);
@@ -780,6 +819,24 @@ export const useStudio = create<StudioState>((set, get) => {
     } finally {
       set({explaining: false});
     }
+  },
+
+  async suggestAssertions(id) {
+    const {journey, states, config} = get();
+    const node = journey.nodes.find((n) => n.id === id);
+    const response = states[id]?.response;
+    if (!node || !response) {
+      return {assertions: [], error: 'Run this step first — there is no response to suggest checks from.'};
+    }
+
+    const def = registryLookup(node.type);
+    return requestAssertions({
+      step: `${node.label ?? def?.label ?? node.type} — ${def?.request?.method ?? ''} ${def?.request?.path ?? ''}`,
+      response: {status: response.status, body: response.body},
+      schema: def?.responseSchema,
+      nodeIndex: buildNodeIndex(allDefs()),
+      environments: config.environments.map((e) => `${e.name} | ${e.baseUrl}`).join('\n'),
+    });
   },
 
     resetConversation: () => set({aiTurns: []}),
