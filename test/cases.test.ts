@@ -281,3 +281,24 @@ describe('warning before a data-driven run quietly tests one thing', () => {
     expect(checkJourney({...one, cases: undefined}, () => needs)[0]).toMatchObject({kind: 'missing-context'});
   });
 });
+
+describe('a blanket variable versus a case that names it', () => {
+  it('lets a case override a value seeded for the whole run', async () => {
+    // --var is a default for the suite; a data-driven row is the point of the
+    // run. If the flag won, it would silently flatten every row to one.
+    const {seen, transport} = transportThat(() => ({status: 200, body: {}}));
+    await runJourneyCases(
+      {...JOURNEY, cases: [{name: 'a', vars: {country: 'NG'}}, {name: 'b', vars: {}}]},
+      {env: 'test', lookup: () => DEF, transport, seed: {country: 'FROM-FLAG'}},
+    );
+
+    // Row one names it and wins; row two does not, so the flag supplies it.
+    expect(seen).toEqual(['/echo/NG', '/echo/FROM-FLAG']);
+  });
+
+  it('seeds a journey with no cases at all', async () => {
+    const {seen, transport} = transportThat(() => ({status: 200, body: {}}));
+    await runJourneyCases(JOURNEY, {env: 'test', lookup: () => DEF, transport, seed: {country: 'KE'}});
+    expect(seen).toEqual(['/echo/KE']);
+  });
+});

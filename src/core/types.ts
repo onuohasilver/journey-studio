@@ -290,6 +290,13 @@ export interface Journey {
   edges: JourneyEdge[];
   /** Run once per case when present, otherwise once with no seed. */
   cases?: JourneyCase[];
+  /**
+   * Labels for choosing what to run — `smoke`, `payments`, `nightly`.
+   *
+   * Needed the moment a suite passes ten journeys: running everything on every
+   * pull request is how a suite becomes something people skip.
+   */
+  tags?: string[];
 }
 
 // ---- importing ----
@@ -312,7 +319,7 @@ export interface ImportResult {
   warnings: string[];
   error?: string;
   /** Which importer produced this. */
-  format?: 'openapi' | 'postman';
+  format?: 'openapi' | 'postman' | 'har' | 'curl';
 }
 
 // ---- configuration ----

@@ -6,6 +6,8 @@ import type {ImportResult} from '../core/types';
 const FORMAT_LABEL: Record<string, string> = {
   openapi: 'OpenAPI document',
   postman: 'Postman collection',
+  har: 'Browser recording',
+  curl: 'curl command',
   unknown: 'unrecognised',
 };
 
@@ -29,7 +31,8 @@ export function ImportDialog({onClose}: {onClose: () => void}) {
         <header>
           <h2>Import nodes</h2>
           <p>
-            Drop an OpenAPI 3 document (JSON or YAML) or a Postman v2 collection. The format is detected
+            Drop an OpenAPI 3 document (JSON or YAML), a Postman v2 collection, a HAR recorded from your
+            browser's network panel, or a pasted curl command. The format is detected
             from the file, so you don't have to say which it is.
           </p>
         </header>
@@ -56,7 +59,7 @@ export function ImportDialog({onClose}: {onClose: () => void}) {
             <input
               ref={fileInput}
               type="file"
-              accept=".json,.yaml,.yml,application/json,text/yaml"
+              accept=".json,.yaml,.yml,.har,.txt,.sh,application/json,text/yaml"
               style={{display: 'none'}}
               onChange={(e) => {
                 const file = e.target.files?.[0];
@@ -71,7 +74,7 @@ export function ImportDialog({onClose}: {onClose: () => void}) {
               id="paste"
               value={pasted}
               onChange={(e) => setPasted(e.target.value)}
-              placeholder="openapi: 3.0.0 …"
+              placeholder="openapi: 3.0.0 …  ·  curl https://api.example.com/v1/orders …"
             />
             {pasted.trim() && (
               <span className="help">Looks like a {FORMAT_LABEL[detectFormat(pasted)]}.</span>

@@ -29,6 +29,8 @@ export interface StepReport {
   budgetMs?: number;
   /** Set when this run exceeded that budget. */
   overBudget?: {budgetMs: number; actualMs: number};
+  /** How many times the request was sent. Above one means the step polled. */
+  attempts?: number;
   /** True for a cleanup step, which runs after the journey either way. */
   teardown?: boolean;
   /** What happened when this step fired a burst of identical requests. */
@@ -148,6 +150,7 @@ export function buildJourneyReport(
       shapeChanges,
       ...(node.budgetMs ? {budgetMs: node.budgetMs} : {}),
       ...(state.overBudget ? {overBudget: state.overBudget} : {}),
+      ...(state.attempts && state.attempts > 1 ? {attempts: state.attempts} : {}),
       ...(state.teardown ? {teardown: true} : {}),
       ...(state.mocked ? {mocked: true} : {}),
       ...(state.response?.concurrent ? {concurrent: state.response.concurrent} : {}),

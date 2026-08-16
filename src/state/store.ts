@@ -61,6 +61,7 @@ export interface SavedSummary {
   steps: number;
   cases: number;
   snapshot: boolean;
+  tags: string[];
 }
 
 interface StudioState {
@@ -130,6 +131,7 @@ interface StudioState {
   removeImported(slug: string): void;
 
   setCases(cases: JourneyCase[] | undefined): void;
+  setTags(tags: string[]): void;
   setTeardown(id: string, teardown: boolean): void;
   setBudget(id: string, budgetMs: number | undefined): void;
   setAssertions(id: string, assertions: Assertion[] | undefined): void;
@@ -505,6 +507,10 @@ export const useStudio = create<StudioState>((set, get) => {
     // Undoable like any other edit: pasting the wrong spreadsheet over a curated
     // set of cases should cost one Cmd+Z, not a re-import.
     mutate('change cases', (journey) => ({...journey, cases: cases?.length ? cases : undefined}));
+  },
+
+  setTags(tags) {
+    mutate('change tags', (journey) => ({...journey, tags: tags.length ? tags : undefined}), 'tags');
   },
 
   setTeardown(id, teardown) {

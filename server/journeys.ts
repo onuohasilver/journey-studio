@@ -120,6 +120,7 @@ export interface JourneySummary {
   cases: number;
   /** Whether a recorded shape exists to compare against. */
   snapshot: boolean;
+  tags: string[];
 }
 
 export async function listJourneys(root: string): Promise<JourneySummary[]> {
@@ -139,10 +140,14 @@ export async function listJourneys(root: string): Promise<JourneySummary[]> {
         steps: saved.journey?.nodes?.length ?? 0,
         cases: saved.journey?.cases?.length ?? 0,
         snapshot: existsSync(path.join(root, SNAPSHOT_DIR, snapshotNameFor(file))),
+        tags: saved.journey?.tags ?? [],
       });
     } catch {
       // A single unreadable file should not hide the rest of the suite.
-      out.push({name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, description: 'could not be read'});
+      out.push({
+        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [],
+        description: 'could not be read',
+      });
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));

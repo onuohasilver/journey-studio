@@ -28,7 +28,11 @@
         ]
       }
     ],
-    "edges": []
+    "edges": [],
+    "tags": [
+      "smoke",
+      "orders"
+    ]
   },
   "defs": []
 }

@@ -42,6 +42,8 @@ a document instead, and the format is detected from its contents:
 |---|---|
 | **OpenAPI 3.x** (JSON or YAML) | paths, methods, path/query/header params, JSON bodies seeded from the spec's own examples, local `$ref`, enums as selects, the documented 2xx as the status assertion |
 | **Postman Collection v2.x** | folders as groups, `:pathVariables`, headers, query, raw/urlencoded/formdata bodies — **and `pm.*.set()` calls transcribed into `gives`** |
+| **HAR** (browser recording) | one step per API call, assets and analytics filtered out, **and the chain inferred from the traffic itself** |
+| **curl** | a pasted command, or a file of them — the format every API's docs and every browser's "Copy as cURL" already speak |
 
 Two details that matter:
 
@@ -55,6 +57,32 @@ Two details that matter:
 Path parameters default to `{{vars.<name>}}`, which is the single choice that makes an imported
 document chain: if an earlier step produced `petId`, a later `/pets/{petId}` picks it up with no
 wiring at all.
+
+### Recording a flow you have no spec for
+
+Plenty of the APIs worth testing have no document — the internal one nobody wrote down, the flow that
+only exists as four calls the front end happens to make in order. For those, the recording *is* the
+specification. Click the flow in your app, export a HAR from the network panel, and drop it in.
+
+A flat list of requests is not a journey, though; it is a recording that breaks the moment an id
+changes. So the importer looks for **values one response produced and a later request used**, and
+wires those as `gives` and `{{vars.x}}`:
+
+```
+POST /oauth/token   gives accesstoken
+POST /pet           Authorization: Bearer {{vars.accesstoken}}   gives id
+GET  /pet/{{vars.id}}
+```
+
+Matching is on the literal text, so no convention about naming is needed. Two rules keep it honest:
+a value must look like an identifier — a digit, a separator, or real length — because `"Bearer"` is
+six characters and chaining it produces a journey that reads like nonsense; and nothing links
+backwards, because a value cannot come from a response that had not arrived yet.
+
+A recorded credential is **replaced by a reference to the step that produced it** rather than
+imported. `Bearer {{vars.accesstoken}}` stores no secret and makes the journey self-contained: it
+logs in and uses what it got. A credential that came from your session rather than from a step here
+is dropped, with a note saying so.
 
 ## Build with AI
 
@@ -88,6 +116,10 @@ npx journey run -u                    # record what the responses look like now
 npx journey run --strict              # fail on drift, not just on assertions
 npx journey run --mock-webhooks       # replay saved callbacks instead of waiting
 npx journey compare --env a --with b  # the same journey against two environments
+npx journey run --tag smoke           # only journeys carrying that tag
+npx journey run --var country=NG      # seed a value into every run
+npx journey run --junit junit.xml     # results every CI renders natively
+npx journey init --ci                 # write a working GitHub Action
 npx journey run --no-history          # do not append this run to history/
 ```
 
@@ -341,6 +373,37 @@ step that broke in January, was fixed, and broke again yesterday is failing sinc
 "since January" would send someone to the wrong commit. History is keyed on step id, so renaming a
 step does not silently start its history over.
 
+### Fitting into CI
+
+`--junit` writes the one format every CI already understands, so failures show up as rows with
+messages inline, and GitHub, GitLab and CircleCI apply their own history and flake tracking for free.
+A journey becomes a suite; a step becomes a test.
+
+Three things have no JUnit equivalent and would otherwise be lost, so they go in `system-out` where
+every renderer shows them: **drift**, **a step that polled**, and — most importantly — **a webhook
+delivered from a mock**. A mocked run must never read as proof the integration works.
+
+`journey init --ci` writes a workflow that runs on push and nightly, and uploads the report with
+`if: always()` — because the run worth having the report from is the one that failed, which is the
+line everyone forgets writing it by hand.
+
+### Choosing what to run
+
+Tag a journey and run subsets:
+
+```bash
+npx journey run --tag smoke                # on every pull request
+npx journey run --tag nightly --strict     # once a day, drift is a failure
+```
+
+Names and tags both narrow: `--tag smoke checkout` means "the checkout journey, if it is a smoke
+test". The union reading is what somebody eventually wants and is not what anyone expects from the
+same command. When nothing matches, the error names the tags that *are* in use, because the mistake
+is nearly always a typo.
+
+`--var key=value` seeds a value into every run. A data-driven row that names the same variable wins —
+otherwise the flag would silently flatten a twelve-case run into twelve copies of one.
+
 ### What a report carries
 
 Per step: status, HTTP code, timing, the failing assertion, and — for failures — the exact request
@@ -431,7 +494,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 272 tests, no network
+npm test        # 331 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -465,9 +528,13 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Assertion editor, with paths from the response and AI suggestions
 - [x] Run history, so drift has a timeline
 - [x] Concurrent bursts, to catch races a one-at-a-time runner cannot see
+- [x] HAR and curl import, so a flow with no spec still becomes a journey
+- [x] JUnit output and `journey init --ci`
+- [x] Tags and `--var`, for choosing what runs
 - [ ] Shared setup journeys, so a suite logs in once rather than twenty times
-- [ ] `journey init --ci`, writing a working GitHub Action
 - [ ] Sweep, to clean up records earlier failed runs left behind
+- [ ] OpenTelemetry metrics, so budgets sit beside production latency
+- [ ] Issue-tracker filing, deduplicated against `failing since`
 
 ## License
 

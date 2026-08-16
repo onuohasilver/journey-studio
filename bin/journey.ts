@@ -13,6 +13,8 @@
 //   journey run --slack                  post the result
 //   journey run -u                       record what the responses look like now
 //   journey run --strict                 fail on drift, not just on assertions
+//   journey run --tag smoke              only journeys carrying that tag
+//   journey run --var env=eu             seed a value into every run
 //   journey run --mock-webhooks          deliver saved payloads instead of waiting
 //   journey compare --env staging --with prod   the same journey, both sides
 //
@@ -20,11 +22,12 @@
 
 import {readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import {existsSync} from 'node:fs';
 import express from 'express';
 import {runJourney, runJourneyCases, shapesFrom, type Transport} from '../src/core/engine';
 import {register, lookup, resetRegistry} from '../src/core/registry';
 import {BUILTINS, withMaterialised} from '../src/core/builtins';
-import {casesFromCsv} from '../src/core/csv';
+import {casesFromCsv, coerce} from '../src/core/csv';
 import {checkJourney} from '../src/core/graph';
 import {
   buildJourneyReport,
@@ -36,11 +39,13 @@ import {
   type QaReport,
 } from '../src/core/report';
 import {compareRuns, summariseComparison} from '../src/core/compare';
+import {selectJourneys} from '../src/core/select';
 import {describeTrend, trendsFrom} from '../src/core/history';
+import {githubWorkflow, toJunitXml} from '../src/core/junit';
 import {formatReport, sendToSlack} from '../src/core/slack';
 import {loadConfig} from '../server/config';
 import {sendRequest} from '../server/proxy';
-import {listJourneys, loadJourney, loadSnapshot, saveSnapshot, loadHistory, recordHistory} from '../server/journeys';
+import {listJourneys, loadJourney, loadSnapshot, saveSnapshot, loadHistory, recordHistory, type JourneySummary} from '../server/journeys';
 import {createInboxRouter, inbox, loadMocks} from '../server/inbox';
 import type {Journey, NodeState, ResolvedRequest} from '../src/core/types';
 
@@ -55,6 +60,9 @@ interface Options {
   strictSnapshot: boolean;
   strictBudget: boolean;
   noHistory: boolean;
+  junit?: string;
+  tags: string[];
+  vars: Record<string, unknown>;
   updateSnapshots: boolean;
   mockWebhooks: boolean;
   inboxPort: number;
@@ -72,6 +80,8 @@ function parseArgs(argv: string[]): Options {
     strictSnapshot: false,
     strictBudget: false,
     noHistory: false,
+    tags: [],
+    vars: {},
     updateSnapshots: false,
     mockWebhooks: false,
     inboxPort: Number(process.env.INBOX_PORT) || 5179,
@@ -92,6 +102,15 @@ function parseArgs(argv: string[]): Options {
       case '--with': options.with = argv[++i]; break;
       case '--mock-webhooks': options.mockWebhooks = true; break;
       case '--no-history': options.noHistory = true; break;
+      case '--junit': options.junit = argv[++i] ?? 'junit.xml'; break;
+      case '--tag': options.tags.push(...String(argv[++i] ?? '').split(',').map((t) => t.trim()).filter(Boolean)); break;
+      case '--var': {
+        const raw = String(argv[++i] ?? '');
+        const at = raw.indexOf('=');
+        if (at <= 0) throw new Error(`--var needs key=value, got "${raw}"`);
+        options.vars[raw.slice(0, at)] = coerce(raw.slice(at + 1));
+        break;
+      }
       case '--inbox-port': options.inboxPort = Number(argv[++i]) || 5179; break;
       // One flag for "any drift is a failure", because that is the thing people
       // actually want and nobody remembers three flags for it.
@@ -118,6 +137,9 @@ const USAGE = `journey run [names…] [options]
   --data <file.csv>     run each journey once per row, header names the variables
   --repeat <n>          run the suite n times and report flaky steps
   --report <file>       write the full report as JSON
+  --junit <file>        write JUnit XML, which every CI renders natively
+  --tag <name>          only journeys carrying this tag (repeatable, or a,b)
+  --var <key=value>     seed a value into every run (repeatable)
   --slack               post the result to the configured webhook
   -u, --update-snapshots  record the response shapes as the new baseline
   --strict              fail on drift — contract or shape — not just assertions
@@ -130,11 +152,28 @@ const USAGE = `journey run [names…] [options]
   --include-bodies      keep response bodies for failures in the JSON report
   --quiet               only print the verdict
 
+journey init --ci
+
+  Write .github/workflows/journeys.yml — the suite on every push and nightly.
+
 journey compare [names…] --env <a> --with <b>
 
   Runs each journey against both environments and prints only where they
   disagree: statuses, response shapes, and steps one side is much slower at.
 `;
+
+/** Which journeys this invocation runs, with the CLI's own error phrasing. */
+function select(available: JourneySummary[], options: Options, root: string): JourneySummary[] {
+  const {wanted, error} = selectJourneys(available, {names: options.names, tags: options.tags});
+  if (error) {
+    throw new Error(
+      error === 'No saved journeys yet. Save one from the studio first.'
+        ? `No saved journeys in ${path.join(root, 'journeys')}. Save one from the studio first.`
+        : error,
+    );
+  }
+  return wanted;
+}
 
 async function runOnce(options: Options, root: string): Promise<QaReport> {
   const config = loadConfig(root);
@@ -150,18 +189,7 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
     send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
   };
 
-  const available = await listJourneys(root);
-  const wanted = options.names.length
-    ? available.filter((j) => options.names.some((n) => j.name === n || j.file === n || j.file === `${n}.journey.json`))
-    : available;
-
-  if (!wanted.length) {
-    throw new Error(
-      options.names.length
-        ? `No saved journey matched: ${options.names.join(', ')}`
-        : `No saved journeys in ${path.join(root, 'journeys')}. Save one from the studio first.`,
-    );
-  }
+  const wanted = select(await listJourneys(root), options, root);
 
   // A CSV on the command line overrides whatever the file carries, so the same
   // saved journey can be pointed at a different dataset per environment.
@@ -210,6 +238,9 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       lookup: withMaterialised(lookup),
       transport,
       baseline: recorded?.nodes,
+      // Under the case's own values: a row that names `country` should win over
+      // a blanket --var, or the flag would silently flatten a data-driven run.
+      ...(Object.keys(options.vars).length ? {seed: options.vars} : {}),
       inbox: {
         async claim(match, claimOpts) { return inbox.claim(match, claimOpts); },
         async describeUnmatched(since) { return inbox.describeUnmatched(since); },
@@ -278,10 +309,7 @@ async function runIn(env: string, options: Options, root: string) {
     send: (request: ResolvedRequest, forEnv: string) => sendRequest(request, forEnv, config),
   };
 
-  const available = await listJourneys(root);
-  const wanted = options.names.length
-    ? available.filter((j) => options.names.some((n) => j.name === n || j.file === n || j.file === `${n}.journey.json`))
-    : available;
+  const wanted = select(await listJourneys(root), options, root);
 
   const out: {journey: Journey; states: Record<string, NodeState>; lookup: typeof lookup}[] = [];
   for (const summary of wanted) {
@@ -357,6 +385,24 @@ async function main(): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
+  if (command === 'init') {
+    const {mkdir} = await import('node:fs/promises');
+    const root = process.cwd();
+    const dir = path.join(root, '.github', 'workflows');
+    const file = path.join(dir, 'journeys.yml');
+    if (existsSync(file)) {
+      process.stderr.write(`${path.relative(root, file)} already exists — delete it first if you want it rewritten.\n`);
+      return 2;
+    }
+    await mkdir(dir, {recursive: true});
+    await writeFile(file, githubWorkflow({env: parseArgs(rest).env}), 'utf8');
+    process.stdout.write(
+      `wrote ${path.relative(root, file)}\n` +
+        `Add your secrets under Settings → Secrets and variables → Actions, then push.\n`,
+    );
+    return 0;
+  }
+
   if (command !== 'run' && command !== 'compare') {
     process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
     return 2;
@@ -413,6 +459,11 @@ async function runAll(options: Options, root: string): Promise<number> {
   if (options.report) {
     await writeFile(path.resolve(root, options.report), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     process.stdout.write(`\nreport written to ${options.report}\n`);
+  }
+
+  if (options.junit) {
+    await writeFile(path.resolve(root, options.junit), toJunitXml(report), 'utf8');
+    process.stdout.write(`junit written to ${options.junit}\n`);
   }
 
   if (options.slack) {

@@ -56,6 +56,10 @@
         "source": "s2",
         "target": "s3"
       }
+    ],
+    "tags": [
+      "smoke",
+      "pets"
     ]
   },
   "defs": [

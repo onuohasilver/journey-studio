@@ -505,6 +505,7 @@ export function SavedPanel() {
   const saveJourney = useStudio((s) => s.saveJourney);
   const openJourney = useStudio((s) => s.openJourney);
   const deleteSaved = useStudio((s) => s.deleteSaved);
+  const setTags = useStudio((s) => s.setTags);
   const [name, setName] = useState(journey.name);
   const [note, setNote] = useState<string | null>(null);
 
@@ -518,6 +519,20 @@ export function SavedPanel() {
           no document to import.
         </span>
       </div>
+      <div className="field">
+        <label htmlFor="journey-tags">Tags</label>
+        <input
+          id="journey-tags"
+          value={(journey.tags ?? []).join(', ')}
+          placeholder="smoke, payments"
+          onChange={(e) => setTags(e.target.value.split(',').map((t) => t.trim()).filter(Boolean))}
+        />
+        <span className="help">
+          Run a subset with <code>--tag smoke</code>. Needed the moment a suite passes ten journeys —
+          running everything on every pull request is how a suite becomes something people skip.
+        </span>
+      </div>
+
       <button
         className="btn go"
         disabled={!name.trim() || !journey.nodes.length}
@@ -541,6 +556,7 @@ export function SavedPanel() {
           <div className="nm">{item.name}</div>
           <div className="sub">
             {item.steps} steps
+            {item.tags?.length ? ` · ${item.tags.join(', ')}` : ''}
             {item.cases ? ` · ${item.cases} cases` : ''}
             {item.snapshot ? ' · shapes recorded' : ''}
             {item.savedAt ? ` · ${item.savedAt.slice(0, 10)}` : ''}
