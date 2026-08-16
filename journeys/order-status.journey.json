@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "Order status",
-  "description": "Reads the order.",
+  "description": "Keeps asking until the order settles \u2014 the stub settles on the third ask.",
   "savedAt": "2026-08-16T00:00:00.000Z",
   "env": "local",
   "journey": {
@@ -19,13 +19,16 @@
           "x": 200,
           "y": 180
         },
-        "assertions": [
+        "until": [
           {
             "path": "body.status",
             "op": "eq",
             "expected": "settled"
           }
-        ]
+        ],
+        "pollEveryMs": 400,
+        "pollTimeoutMs": 10000,
+        "budgetMs": 200
       }
     ],
     "edges": [],

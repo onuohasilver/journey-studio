@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "journey": "Pet with cleanup",
+  "recordedAt": "2026-08-16T10:37:12.965Z",
+  "env": "local",
+  "nodes": {
+    "s1": {
+      "id": "number",
+      "name": "string",
+      "photoUrls": "array",
+      "tags": "array",
+      "status": "string"
+    },
+    "s2": {
+      "id": "number",
+      "name": "string",
+      "photoUrls": "array",
+      "tags": "array",
+      "status": "string"
+    },
+    "s3": {
+      "code": "number",
+      "message": "string"
+    }
+  }
+}

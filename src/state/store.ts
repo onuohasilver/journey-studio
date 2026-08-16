@@ -63,6 +63,7 @@ export interface SavedSummary {
   snapshot: boolean;
   tags: string[];
   uses: string[];
+  serial: boolean;
 }
 
 interface StudioState {

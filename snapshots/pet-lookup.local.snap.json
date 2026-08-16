@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "journey": "Pet lookup",
+  "recordedAt": "2026-08-16T10:37:12.954Z",
+  "env": "local",
+  "nodes": {
+    "s2": {
+      "id": "number",
+      "name": "string",
+      "photoUrls": "array",
+      "photoUrls.*": "string",
+      "tags": "array",
+      "tags.*": "object",
+      "tags.*.id": "number",
+      "tags.*.name": "string",
+      "status": "string",
+      "category": "object",
+      "category.id": "number",
+      "category.name": "string"
+    },
+    "s3": {
+      "": "array",
+      ".*": "object",
+      ".*.id": "number",
+      ".*.name": "string",
+      ".*.photoUrls": "array",
+      ".*.photoUrls.*": "string?",
+      ".*.tags": "array",
+      ".*.tags.*": "object?",
+      ".*.tags.*.id": "number?",
+      ".*.tags.*.name": "string?",
+      ".*.status": "string",
+      ".*.category": "object",
+      ".*.category.id": "number",
+      ".*.category.name": "string"
+    }
+  }
+}

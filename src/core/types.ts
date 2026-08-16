@@ -314,6 +314,14 @@ export interface Journey {
    * leave twenty sessions behind. Naming the setup once means it runs once.
    */
   uses?: string[];
+  /**
+   * Never run this alongside anything else.
+   *
+   * The escape hatch for a journey that owns shared state — a balance, a
+   * singleton record, a queue it drains. Concurrency is opt-in per suite, and
+   * this is how one journey opts back out of it.
+   */
+  serial?: boolean;
 }
 
 // ---- importing ----

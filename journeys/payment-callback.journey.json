@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "Payment callback",
-  "description": "Starts a payment, then waits for the provider to call back about it.",
+  "description": "Waits for a callback. Open the Inbox rail and press Fire now on the 'settled' mock, or tick 'Deliver from mocks'.",
   "savedAt": "2026-08-16T00:00:00.000Z",
   "env": "local",
   "journey": {
@@ -36,7 +36,7 @@
           "capture": {
             "settlementStatus": "body.status"
           },
-          "timeoutMs": 15000,
+          "timeoutMs": 20000,
           "mock": "settled"
         }
       },

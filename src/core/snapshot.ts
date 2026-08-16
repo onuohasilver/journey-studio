@@ -234,6 +234,19 @@ export function readSnapshot(text: string): SnapshotFile | undefined {
   }
 }
 
-export function snapshotNameFor(journeyFile: string): string {
-  return `${journeyFile.replace(/\.journey\.json$/, '')}.snap.json`;
+/**
+ * Where a journey's recorded shapes live, per environment.
+ *
+ * Staging and production legitimately differ — a feature flag, a field one build
+ * has and the other does not — so a single baseline makes one of them report
+ * drift for ever. Recording per environment is the only way the check stays
+ * quiet enough to be worth reading.
+ *
+ * With no environment it falls back to the old name, so baselines recorded
+ * before this keep working rather than silently starting over.
+ */
+export function snapshotNameFor(journeyFile: string, env?: string): string {
+  const base = journeyFile.replace(/\.journey\.json$/, '');
+  const suffix = env ? `.${env.replace(/[^A-Za-z0-9_-]+/g, '-')}` : '';
+  return `${base}${suffix}.snap.json`;
 }

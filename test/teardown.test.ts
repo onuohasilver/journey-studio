@@ -307,3 +307,39 @@ describe('comparing two environments', () => {
     expect(reached[0].message).toContain('prod stopped before it');
   });
 });
+
+describe('what a timing budget measures', () => {
+  it('bills the API, not the waiting', async () => {
+    // A step that polled for ten seconds spent almost none of it waiting on the
+    // API. Judging the budget on wall time would mark every eventually-consistent
+    // read as slow, which is exactly the noise budgets exist to avoid.
+    const report = buildReport('test', [
+      {
+        name: 'Polling',
+        status: 'passed',
+        durationMs: 0,
+        created: [],
+        contractBreaks: 0,
+        shapeBreaks: 0,
+        leaked: [],
+        mocked: 0,
+        steps: [
+          {
+            id: 's1',
+            label: 'Read the order',
+            type: 'demo.get',
+            status: 'passed',
+            durationMs: 9000,      // nine seconds of polling…
+            responseMs: 20,         // …of which the API took 20ms
+            budgetMs: 100,
+            failedAssertions: [],
+            contract: [],
+            shapeChanges: [],
+          },
+        ],
+      },
+    ], {startedAt: 'x', durationMs: 9000});
+
+    expect(findSlowSteps([report])).toEqual([]);
+  });
+});

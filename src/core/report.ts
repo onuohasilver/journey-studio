@@ -19,7 +19,16 @@ export interface StepReport {
   type: string;
   status: RunStatus;
   httpStatus?: number;
+  /** Wall time for the whole step, including any polling it did. */
   durationMs?: number;
+  /**
+   * How long the API itself took to answer, last attempt only.
+   *
+   * Separate from `durationMs` because a step that polled for ten seconds spent
+   * almost none of that waiting on the API, and billing a timing budget for it
+   * would mark every eventually-consistent read as slow.
+   */
+  responseMs?: number;
   error?: string;
   failedAssertions: string[];
   contract: ContractFinding[];
@@ -149,6 +158,7 @@ export function buildJourneyReport(
       status: state.status,
       httpStatus: state.response?.status,
       durationMs: state.durationMs,
+      ...(state.response ? {responseMs: state.response.durationMs} : {}),
       error: state.error,
       failedAssertions: (state.assertions ?? [])
         .filter((a) => !a.pass)
@@ -267,12 +277,15 @@ export function findSlowSteps(attempts: QaReport[]): StepTiming[] {
   for (const attempt of attempts) {
     for (const journey of attempt.journeys) {
       for (const step of journey.steps) {
-        if (!step.budgetMs || step.durationMs === undefined) continue;
+        // The API's own latency, not the wall clock around it — the same
+        // measure the per-run budget check uses, so the two cannot disagree.
+        const observed = step.responseMs ?? step.durationMs;
+        if (!step.budgetMs || observed === undefined) continue;
         // Keyed on the journey, not the case: twelve rows of one journey are
         // twelve samples of the same step, which is the point.
         const key = `${journey.name}\u0000${step.id}`;
         const row = samples.get(key) ?? {journey: journey.name, step: step.label, budgetMs: step.budgetMs, times: []};
-        row.times.push(step.durationMs);
+        row.times.push(observed);
         samples.set(key, row);
       }
     }

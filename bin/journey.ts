@@ -41,6 +41,7 @@ import {
 } from '../src/core/report';
 import {compareRuns, summariseComparison} from '../src/core/compare';
 import {selectJourneys} from '../src/core/select';
+import {buffered, inPool} from '../src/core/pool';
 import {orderBySetup, type SetupResult} from '../src/core/setup';
 import {describeTrend, markSwept, orphansIn, trendsFrom, type StepTrend} from '../src/core/history';
 import {githubWorkflow, toJunitXml} from '../src/core/junit';
@@ -66,6 +67,7 @@ interface Options {
   noHistory: boolean;
   junit?: string;
   otlp: boolean;
+  parallel: number;
   fileIssues: boolean;
   tags: string[];
   vars: Record<string, unknown>;
@@ -87,6 +89,7 @@ function parseArgs(argv: string[]): Options {
     strictBudget: false,
     noHistory: false,
     otlp: false,
+    parallel: 1,
     fileIssues: false,
     tags: [],
     vars: {},
@@ -111,6 +114,7 @@ function parseArgs(argv: string[]): Options {
       case '--mock-webhooks': options.mockWebhooks = true; break;
       case '--no-history': options.noHistory = true; break;
       case '--otlp': options.otlp = true; break;
+      case '--parallel': options.parallel = Math.max(1, Number(argv[++i]) || 1); break;
       case '--file-issues': options.fileIssues = true; break;
       case '--junit': options.junit = argv[++i] ?? 'junit.xml'; break;
       case '--tag': options.tags.push(...String(argv[++i] ?? '').split(',').map((t) => t.trim()).filter(Boolean)); break;
@@ -148,6 +152,7 @@ const USAGE = `journey run [names…] [options]
   --repeat <n>          run the suite n times and report flaky steps
   --report <file>       write the full report as JSON
   --junit <file>        write JUnit XML, which every CI renders natively
+  --parallel <n>        run n journeys at once; setups and serial ones stay alone
   --otlp                export metrics to the configured OTLP collector
   --file-issues         open, update and close tracker issues for failing steps
   --tag <name>          only journeys carrying this tag (repeatable, or a,b)
@@ -247,49 +252,52 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
   const setups = new Map<string, SetupResult>();
   const skipped: {name: string; reason: string}[] = [];
 
-  for (const summary of wanted) {
+  /**
+   * One journey, start to finish.
+   *
+   * Extracted so it can run alone or in a pool, and given its *own* definitions
+   * rather than mutating the shared registry. The registry is a singleton, so
+   * two journeys running at once would each reset it under the other and end up
+   * resolving the wrong node types — a bug that could not happen while
+   * everything was sequential and would have been very hard to see once it was.
+   */
+  const runJourneyFile = async (
+    summary: JourneySummary,
+    log: (line: string) => void,
+  ): Promise<{reports: JourneyReport[]; setup?: SetupResult; skipped?: {name: string; reason: string}}> => {
     const saved = await loadJourney(root, summary.file);
-    if (!saved) continue;
+    if (!saved) return {reports: []};
 
-    // What its setups produced, resolved before this journey runs. Each setup
-    // has already run by now: `orderBySetup` put it earlier in this loop.
+    // What its setups produced. Every setup has already finished: they run in
+    // dependency order, and never in parallel with what depends on them.
     const inherited: Record<string, unknown> = {};
-    let blockedBy: string | undefined;
     for (const use of saved.journey.uses ?? []) {
       const result = setups.get(use);
       if (!result) continue;
       if (!result.ok) {
-        blockedBy = `${use} (${result.error ?? 'setup failed'})`;
-        break;
+        // Skipped, not failed. Twenty red rows for one broken login buries the
+        // news, and this journey never touched the API under test.
+        const reason = `${use} (${result.error ?? 'setup failed'})`;
+        log(`· ${summary.name} — skipped, needs ${reason}`);
+        return {reports: [], skipped: {name: summary.name, reason}};
       }
       Object.assign(inherited, result.vars);
     }
 
-    if (blockedBy) {
-      // Skipped, not failed. Twenty red rows for one broken login buries the
-      // news, and these journeys never touched the API under test.
-      if (!options.quiet) process.stdout.write(`  · ${summary.name} — skipped, needs ${blockedBy}\n`);
-      skipped.push({name: summary.name, reason: blockedBy});
-      continue;
-    }
-
     // Definitions travel inside the file, so CI needs no spec and no import.
-    resetRegistry();
-    register(BUILTINS);
-    register(saved.defs);
+    const defs = new Map([...BUILTINS, ...saved.defs].map((d) => [d.type, d]));
+    const lookupHere = withMaterialised((type: string) => defs.get(type));
 
-    const recorded = await loadSnapshot(root, summary.file);
+    const recorded = await loadSnapshot(root, summary.file, env);
     const journey = override ? {...saved.journey, cases: override.cases} : saved.journey;
 
-    if (!options.quiet && journey.cases?.length) {
-      process.stdout.write(`\n${journey.name} — ${journey.cases.length} cases\n`);
-    }
+    if (journey.cases?.length) log(`${journey.name} — ${journey.cases.length} cases`);
 
     // A journey whose steps overwrite what the cases supply runs every row
     // against the same value and reports all of them green. That is worth
     // shouting about even in --quiet, because the alternative is a suite that
     // looks like coverage and is not.
-    for (const problem of checkJourney(journey, lookup)) {
+    for (const problem of checkJourney(journey, (t) => lookupHere(t))) {
       if (problem.kind !== 'case-overwritten') continue;
       const step = journey.nodes.find((n) => n.id === problem.nodeId);
       process.stderr.write(`  ! "${step?.label ?? problem.nodeId}" ${problem.message}\n`);
@@ -297,7 +305,7 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
 
     const runs = await runJourneyCases(journey, {
       env,
-      lookup: withMaterialised(lookup),
+      lookup: lookupHere,
       transport,
       baseline: recorded?.nodes,
       // Under the case's own values: a row that names `country` should win over
@@ -315,42 +323,33 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       // Recording and comparing at once would make every run agree with itself.
       strictSnapshot: options.strictSnapshot && !options.updateSnapshots,
       strictBudget: options.strictBudget,
-      hooks: options.quiet ? undefined : {onLog: (line) => process.stdout.write(`  ${line}\n`)},
+      hooks: options.quiet ? undefined : {onLog: log},
     });
 
-    for (const run of runs) {
-      reports.push(
-        buildJourneyReport(journey, run.result.states, run.result.context, withMaterialised(lookup), {
-          includeBodies: options.includeBodies,
-          caseName: run.case?.name,
-        }),
-      );
-    }
+    const mine = runs.map((run) =>
+      buildJourneyReport(journey, run.result.states, run.result.context, lookupHere, {
+        includeBodies: options.includeBodies,
+        caseName: run.case?.name,
+      }),
+    );
 
     // If anything uses this journey as a setup, publish what it produced.
     const dependedOn = available.some((j) =>
       j.uses.some((u) => u === summary.name || u === summary.file || `${u}.journey.json` === summary.file),
     );
+    let setup: SetupResult | undefined;
     if (dependedOn) {
-      const last = runs[runs.length - 1];
-      const gave = last?.result.context.vars ?? {};
+      const gave = runs[runs.length - 1]?.result.context.vars ?? {};
       const passed = runs.every((r) => r.result.passed);
-      const result: SetupResult = {
-        vars: passed ? gave : {},
-        ok: passed,
-        ...(passed ? {} : {error: 'its own steps failed'}),
-      };
-      for (const alias of [summary.name, summary.file, summary.file.replace(/\.journey\.json$/, '')]) {
-        setups.set(alias, result);
-      }
-      if (!options.quiet && passed) {
+      setup = {vars: passed ? gave : {}, ok: passed, ...(passed ? {} : {error: 'its own steps failed'})};
+      if (passed) {
         const keys = Object.keys(gave);
-        process.stdout.write(`  ↳ ${summary.name} set up ${keys.length ? keys.join(', ') : 'nothing'} for the rest\n`);
+        log(`↳ ${summary.name} set up ${keys.length ? keys.join(', ') : 'nothing'} for the rest`);
       }
     }
 
     if (!options.noHistory) {
-      const forThis = buildReport(env, reports.slice(-runs.length), {
+      const forThis = buildReport(env, mine, {
         startedAt,
         durationMs: Date.now() - started,
         baseUrl: environment.baseUrl,
@@ -359,11 +358,10 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
 
       // The most useful line after a failure is when it started, and history is
       // the only thing that knows.
-      if (!options.quiet) {
-        const trends = trendsFrom(await loadHistory(root, summary.file));
-        for (const trend of trends.filter((t) => t.failingSince && t.runs > 1)) {
-          process.stdout.write(`  ⌛ ${describeTrend(trend)}\n`);
-        }
+      for (const trend of trendsFrom(await loadHistory(root, summary.file)).filter(
+        (t) => t.failingSince && t.runs > 1,
+      )) {
+        log(`⌛ ${describeTrend(trend)}`);
       }
     }
 
@@ -374,9 +372,61 @@ async function runOnce(options: Options, root: string): Promise<QaReport> {
       const shapes = shapesFrom(runs[0]?.result.states ?? {});
       if (Object.keys(shapes).length) {
         const file = await saveSnapshot(root, summary.file, shapes, {journey: journey.name, env});
-        if (!options.quiet) process.stdout.write(`  recorded ${Object.keys(shapes).length} shapes to ${file}\n`);
+        log(`recorded ${Object.keys(shapes).length} shapes to ${file}`);
       }
     }
+
+    return {reports: mine, setup};
+  };
+
+  const publish = (summary: JourneySummary, setup: SetupResult | undefined) => {
+    if (!setup) return;
+    for (const alias of [summary.name, summary.file, summary.file.replace(/\.journey\.json$/, '')]) {
+      setups.set(alias, setup);
+    }
+  };
+
+  const straight = (line: string) => process.stdout.write(`  ${line}\n`);
+
+  // A journey that others depend on, or that says it owns shared state, runs on
+  // its own. Everything else can overlap — but only when asked: journeys that
+  // share data collide, and the tool cannot know which do.
+  const mustBeAlone = (j: JourneySummary) =>
+    j.serial || available.some((other) => other.uses.some((u) => u === j.name || u === j.file || `${u}.journey.json` === j.file));
+
+  const alone = wanted.filter(mustBeAlone);
+  const together = options.parallel > 1 ? wanted.filter((j) => !mustBeAlone(j)) : [];
+  const sequential = options.parallel > 1 ? alone : wanted;
+
+  for (const summary of sequential) {
+    const {reports: mine, setup, skipped: missed} = await runJourneyFile(summary, straight);
+    reports.push(...mine);
+    publish(summary, setup);
+    if (missed) skipped.push(missed);
+  }
+
+  if (together.length) {
+    if (!options.quiet) {
+      process.stdout.write(`\nrunning ${together.length} journeys ${options.parallel} at a time\n`);
+    }
+    const results = await inPool(together, options.parallel, async (summary) => {
+      const sink = buffered(summary.name);
+      const outcome = await runJourneyFile(summary, sink.log);
+      // Flushed in one piece: interleaved progress from eight journeys is
+      // unreadable, and an unattended run is read afterwards anyway.
+      if (!options.quiet) process.stdout.write(sink.flush());
+      return outcome;
+    });
+
+    results.forEach((result, i) => {
+      if (!result.ok) {
+        process.stderr.write(`  ! ${together[i].name} could not run: ${result.error?.message}\n`);
+        skipped.push({name: together[i].name, reason: result.error?.message ?? 'failed to start'});
+        return;
+      }
+      reports.push(...result.value!.reports);
+      if (result.value!.skipped) skipped.push(result.value!.skipped);
+    });
   }
 
   const report = buildReport(env, reports, {

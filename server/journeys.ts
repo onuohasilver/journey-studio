@@ -48,16 +48,21 @@ function safePath(root: string, name: string): string | undefined {
  * diff in a pull request is the whole point — it turns "the API changed under
  * us" from something discovered in production into a line someone approved.
  */
-function snapshotPath(root: string, name: string): string | undefined {
+function snapshotPath(root: string, name: string, env?: string): string | undefined {
   const journeyFile = safePath(root, name);
   if (!journeyFile) return undefined;
-  return path.join(root, SNAPSHOT_DIR, snapshotNameFor(path.basename(journeyFile)));
+  return path.join(root, SNAPSHOT_DIR, snapshotNameFor(path.basename(journeyFile), env));
 }
 
-export async function loadSnapshot(root: string, name: string): Promise<SnapshotFile | undefined> {
-  const file = snapshotPath(root, name);
-  if (!file || !existsSync(file)) return undefined;
-  return readSnapshot(await readFile(file, 'utf8'));
+export async function loadSnapshot(root: string, name: string, env?: string): Promise<SnapshotFile | undefined> {
+  const file = snapshotPath(root, name, env);
+  if (file && existsSync(file)) return readSnapshot(await readFile(file, 'utf8'));
+
+  // Fall back to a baseline recorded before these were per-environment, so an
+  // upgrade does not silently throw everyone's baselines away.
+  const legacy = snapshotPath(root, name);
+  if (env && legacy && existsSync(legacy)) return readSnapshot(await readFile(legacy, 'utf8'));
+  return undefined;
 }
 
 export async function saveSnapshot(
@@ -66,7 +71,7 @@ export async function saveSnapshot(
   nodes: Record<string, Shape>,
   meta: {journey?: string; env?: string} = {},
 ): Promise<string | undefined> {
-  const file = snapshotPath(root, name);
+  const file = snapshotPath(root, name, meta.env);
   if (!file) return undefined;
   await mkdir(path.dirname(file), {recursive: true});
   const packed = packSnapshot(meta.journey ?? name, nodes, {env: meta.env});
@@ -131,6 +136,8 @@ export interface JourneySummary {
   tags: string[];
   /** Journeys this one needs run first. */
   uses: string[];
+  /** Opts out of running alongside anything else. */
+  serial: boolean;
 }
 
 export async function listJourneys(root: string): Promise<JourneySummary[]> {
@@ -149,14 +156,18 @@ export async function listJourneys(root: string): Promise<JourneySummary[]> {
         savedAt: saved.savedAt ?? '',
         steps: saved.journey?.nodes?.length ?? 0,
         cases: saved.journey?.cases?.length ?? 0,
-        snapshot: existsSync(path.join(root, SNAPSHOT_DIR, snapshotNameFor(file))),
+        snapshot: existsSync(path.join(root, SNAPSHOT_DIR, snapshotNameFor(file))) ||
+          (await readdir(path.join(root, SNAPSHOT_DIR)).catch(() => [])).some((f) =>
+            f.startsWith(`${file.replace(/\.journey\.json$/, '')}.`) && f.endsWith('.snap.json'),
+          ),
         tags: saved.journey?.tags ?? [],
         uses: saved.journey?.uses ?? [],
+        serial: Boolean(saved.journey?.serial),
       });
     } catch {
       // A single unreadable file should not hide the rest of the suite.
       out.push({
-        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [], uses: [],
+        name: file, file, savedAt: '', steps: 0, cases: 0, snapshot: false, tags: [], uses: [], serial: false,
         description: 'could not be read',
       });
     }

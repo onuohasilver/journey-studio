@@ -121,6 +121,7 @@ npx journey run --var country=NG      # seed a value into every run
 npx journey run --junit junit.xml     # results every CI renders natively
 npx journey init --ci                 # write a working GitHub Action
 npx journey sweep --env staging       # delete what earlier failed runs left behind
+npx journey run --parallel 4          # run four journeys at once
 npx journey run --otlp                # export metrics to your collector
 npx journey run --file-issues         # open/update/close tracker issues
 npx journey run --no-history          # do not append this run to history/
@@ -190,9 +191,14 @@ reading it today — error. A field that stopped always being present breaks the
 warning. A new field breaks nobody — information. Reporting additions as failures is how a snapshot
 suite becomes something people delete.
 
-Snapshots live in `snapshots/`, one file per journey, meant to be committed. A shape change arriving
-as a diff in a pull request is the point: it turns "the API changed under us" from something found in
-production into a line somebody approved.
+Snapshots live in `snapshots/`, **one file per journey per environment**, meant to be committed. A
+shape change arriving as a diff in a pull request is the point: it turns "the API changed under us"
+from something found in production into a line somebody approved.
+
+Per environment because staging and production legitimately differ — a feature flag, a field one
+build has and the other does not — and a single shared baseline makes one of them report drift for
+ever, which is how the check stops being read. A baseline recorded before this existed still applies
+as a fallback, so nothing is thrown away.
 
 ### Waiting for a webhook
 
@@ -439,6 +445,30 @@ this is safe to run on a schedule, and only the current environment's leftovers 
 created on staging means nothing in production, and deleting by it there would be a very bad
 surprise.
 
+### Running a suite in parallel
+
+```bash
+npx journey run --parallel 4
+```
+
+Opt-in, and it has to be: journeys that share data collide, and the tool cannot know which do. Two
+kinds stay on their own — a journey another one **uses** as a setup, and any journey marked
+`"serial": true`, the escape hatch for one that owns a balance, a singleton record, or a queue it
+drains.
+
+```
+✓ Slow 2      (serial — alone)
+✓ Slow 3      (a setup — alone)
+running 2 journeys 4 at a time
+  Slow 1, Slow 4 overlap
+```
+
+Four two-second journeys take **8.9s sequentially and 3.3s at `--parallel 4`**.
+
+Each journey's output is buffered and flushed in one piece. Interleaved progress from eight journeys
+is unreadable, and an unattended run is read afterwards anyway. Results keep their input order
+whatever order they finish in, so the report still diffs cleanly between runs.
+
 ### Choosing what to run
 
 Tag a journey and run subsets:
@@ -591,7 +621,7 @@ does not.
 ## Development
 
 ```bash
-npm test        # 384 tests, no network
+npm test        # 396 tests, no network
 npm run typecheck
 npm run build
 ```
@@ -632,8 +662,8 @@ alone, so a half-typed URL is never traded for a canvas edit.
 - [x] Sweep, to clean up records earlier failed runs left behind
 - [x] OpenTelemetry metrics, so budgets sit beside production latency
 - [x] Issue-tracker filing, deduplicated against `failing since`
-- [ ] Parallel journeys within a suite, for the runs that do not share data
-- [ ] Response snapshots per environment, so staging and prod keep separate baselines
+- [x] Parallel journeys within a suite, for the runs that do not share data
+- [x] Response snapshots per environment, so staging and prod keep separate baselines
 
 ## License
 

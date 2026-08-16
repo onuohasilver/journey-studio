@@ -128,6 +128,7 @@ export function readSaved(text: string, registered: (type: string) => NodeDef | 
         ...(Array.isArray(saved.journey.uses) && saved.journey.uses.length
           ? {uses: saved.journey.uses.map(String)}
           : {}),
+        ...(saved.journey.serial ? {serial: true} : {}),
       },
       defs: saved.defs ?? [],
       sources: saved.sources,

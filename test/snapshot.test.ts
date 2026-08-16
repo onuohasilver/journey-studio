@@ -112,3 +112,24 @@ describe('the snapshot file', () => {
     expect(snapshotNameFor('pet-lookup.journey.json')).toBe('pet-lookup.snap.json');
   });
 });
+
+describe('baselines per environment', () => {
+  it('keeps staging and production apart', () => {
+    // They legitimately differ — a feature flag, a field one build has and the
+    // other does not — and one shared baseline makes one of them report drift
+    // for ever, which is how the check stops being read.
+    expect(snapshotNameFor('signup.journey.json', 'staging')).toBe('signup.staging.snap.json');
+    expect(snapshotNameFor('signup.journey.json', 'prod')).toBe('signup.prod.snap.json');
+  });
+
+  it('falls back to the old name when no environment is given', () => {
+    // Baselines recorded before this existed keep working rather than silently
+    // starting over.
+    expect(snapshotNameFor('signup.journey.json')).toBe('signup.snap.json');
+  });
+
+  it('does not let an environment name escape into the path', () => {
+    expect(snapshotNameFor('signup.journey.json', '../../etc')).toBe('signup.-etc.snap.json');
+    expect(snapshotNameFor('signup.journey.json', 'eu west/1')).toBe('signup.eu-west-1.snap.json');
+  });
+});
