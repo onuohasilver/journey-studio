@@ -98,10 +98,10 @@ describe('the run as metrics', () => {
   });
 
   it('identifies itself so it is findable among everything else', () => {
-    const resource = toOtlpMetrics(reportOf([journey()]), {endpoint: '', serviceName: 'afriex-api-journeys'})
+    const resource = toOtlpMetrics(reportOf([journey()]), {endpoint: '', serviceName: 'example-api-journeys'})
       .resourceMetrics[0].resource;
     expect(attrsOf(resource as never)).toMatchObject({
-      'service.name': 'afriex-api-journeys',
+      'service.name': 'example-api-journeys',
       'deployment.environment': 'staging',
     });
   });

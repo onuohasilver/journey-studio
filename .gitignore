@@ -19,3 +19,7 @@ journey.config.local.json
 # else in fixtures/ is committed, because a journey that uploads a document is
 # not reproducible without it.
 fixtures/large.png
+
+# Local working data — real API surfaces get captured here, never publish them.
+groups/
+history/
